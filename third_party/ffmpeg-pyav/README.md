@@ -1,9 +1,15 @@
 # FFmpeg as PyAV builds it (pyav-ffmpeg 8.1.3-1)
 
-**Version note.** ComfyUI's PyAV 18.1.0 carries FFmpeg 8.1.2 (pyav-ffmpeg `8.1.2-1`), and everything
-below was measured with that build. The PyAV project withdrew the `8.1.2-1` release in November
-2026, so rustyui now fetches `8.1.3-1`, the next patch release. The packet-for-packet comparison
-with ComfyUI has not been repeated with 8.1.3 yet.
+**Version note.** ComfyUI's PyAV 18.1.0 carries FFmpeg 8.1.2 (pyav-ffmpeg `8.1.2-1`), and the
+comparison below was first measured with that build. The PyAV project withdrew the `8.1.2-1`
+release in November 2026, so rustyui now fetches `8.1.3-1`, the next patch release (libavcodec
+62.28.103, where ComfyUI's wheel has 62.28.102). Measured with 8.1.3 on 2026-11-10: the i2v graph
+of the README's example, 640x448, 153 frames, with sound, run through `rustyui-backend run` and
+through ComfyUI 0.39.0 gave the same decoded frames (153 of 153), the same H.264 packets (153 of
+153), the same decoded audio samples (485,376 of 485,376) and the same AAC packets (238 of 238).
+The two MP4 files are not the same bytes: the `prompt` text each stores in the container is the
+same JSON written with different spacing. The system's FFmpeg 8.0.1 also gave the same packets on
+that sound, so this run does not by itself show the AAC difference described next.
 
 ComfyUI writes its videos through PyAV, and PyAV 18.1.0 carries its own FFmpeg: 8.1.2 with
 x264 (core 165), built by the PyAV project (github.com/PyAV-Org/pyav-ffmpeg, release `8.1.2-1`).

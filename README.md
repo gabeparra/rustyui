@@ -128,8 +128,11 @@ lighthouse as the dawn light slowly brightens. Gulls glide past the tower. The c
   --width 640 --height 448 --frames 153 --seed 42
 ```
 
-153 frames at 30 fps, 27 s on an RTX 4090 from the command to the MP4 (shown above at half the
-frame rate, 480 px wide).
+153 frames at 30 fps, 46 s on an RTX 4090 from the command to the MP4 with the files listed under
+[Supported models](#supported-models) (shown above at half the frame rate, 480 px wide). The DiT
+there is 42 GB in bf16, so 23 of its 48 blocks sit on the 24 GB card at a time and the 8 steps
+take 27 s of the 46. ComfyUI 0.39.0 renders the same graph to the same frames and the same H.264
+packets.
 
 The [`examples/`](examples) folder holds ComfyUI API graphs for text to image, LoRA and a hires-fix
 pass. Change `ckpt_name` and `lora_name` to files you have.
@@ -167,6 +170,24 @@ The `t2v` and `i2v` commands load LTX-2.3 from fixed names:
 | `checkpoints/ltx-2.3-audio-vae.safetensors` | the audio VAE and vocoder |
 
 In a graph, the loader nodes name the files, as in ComfyUI.
+
+These are published files under those names. This is what rustyui was checked with, on an RTX 4090
+against ComfyUI 0.39.0 (sizes and sha256 are the Hub's):
+
+| Name here | Published file | Licence |
+|---|---|---|
+| `ltx-2.3-distilled.safetensors` | [Kijai/LTX2.3_comfy](https://huggingface.co/Kijai/LTX2.3_comfy), `diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_bf16.safetensors` (Lightricks' distilled 1.1 DiT alone, bf16, 42 GB) | LTX-2 Community License |
+| `ltx-2.3-text-projection.safetensors` | the same repository, `text_encoders/ltx-2.3_text_projection_bf16.safetensors` | LTX-2 Community License |
+| `ltx-2.3-video-vae.safetensors` | the same repository, `vae/LTX23_video_vae_bf16.safetensors` | LTX-2 Community License |
+| `ltx-2.3-audio-vae.safetensors` | the same repository, `vae/LTX23_audio_vae_bf16.safetensors` | LTX-2 Community License |
+| `gemma_3_12B_it_fp4_mixed.safetensors` | [Comfy-Org/ltx-2](https://huggingface.co/Comfy-Org/ltx-2), `split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors` | LTX-2 Community License, and Google's Gemma terms for the model inside |
+| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors`, `ltx-2.3-temporal-upscaler-x2-1.0.safetensors` | [Lightricks/LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3), same names | LTX-2 Community License |
+
+The DiT file stores its scale-shift tables as f32; rustyui rounds them to bf16 when it loads them,
+as ComfyUI does. The fp8 file of the same repository
+(`ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors`) loads and runs, but its
+frames are not ComfyUI's (PSNR 31.5 dB against ComfyUI's on the example above), so use the bf16
+one.
 
 ## Supported nodes
 

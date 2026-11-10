@@ -24,7 +24,6 @@
     "verbatimModuleSyntax": true,
     "paths": {
       "@/*": ["./src/*"],
-      "@e2e/*": ["./browser_tests/*"],
       "@/utils/formatUtil": [
         "./packages/shared-frontend-utils/src/formatUtil.ts"
       ],
@@ -49,7 +48,6 @@
   },
   "include": [
     "__mocks__/**/*.ts",
-    ".storybook/**/*",
     "build/**/*.ts",
     "eslint.config.ts",
     "global.d.ts",

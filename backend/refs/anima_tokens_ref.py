@@ -20,7 +20,7 @@ from comfy.text_encoders.anima import AnimaTokenizer
 PROMPTS = [
     "",
     "a lighthouse on a cliff at dusk",
-    "masterpiece,best quality,score_8,score_7, 1girl, 2boys,  solo ,",
+    "masterpiece,best quality,score_8,score_7, one cat, two dogs,  solo ,",
     "(red fox:1.3), (blue sky), [old], ((very detailed)), (a (nested:1.2) thing:0.8)",
     "escaped \\(parens\\) and a \\\\ backslash, (weighted \\(inner\\):1.1)",
     "embedding:nothing_here, then words",

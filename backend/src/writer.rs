@@ -1,4 +1,4 @@
-//! The prompt writer: a short idea in, a whole SDXL prompt (booru-style tags) out, written by an
+//! The prompt writer: a short idea in, a whole SDXL prompt (comma-separated tags) out, written by an
 //! LLM inside the backend, on the card.
 //!
 //! The model is any GGUF Gemma 3 instruct model, run by candle's quantized Gemma 3 (llama.cpp's
@@ -24,7 +24,7 @@ use std::time::Instant;
 /// says more about the shape of an answer than a list of categories, which a 12B model echoes back
 /// when it is told them in the abstract.
 const INSTRUCTIONS: &str = "\
-You write prompts for an SDXL image model trained on booru-style tags. Turn the request into one \
+You write prompts for an SDXL image model that is prompted with short tags. Turn the request into one \
 line of 25 to 40 comma-separated tags, most important first: the quality tags, then the subject \
 (who or what, how many, colours, build), then what is happening (pose, action, expression, \
 clothing), then where and how (setting, props, light, framing).
@@ -34,7 +34,7 @@ keep its quality tags, its style tags and trigger words (which may look like nam
 subject, and rewrite the rest to fit the request.
 
 Example request: an old fisherman mending nets on a pier at dawn
-Example answer: masterpiece, best quality, highly detailed, 1boy, solo, old man, grey beard, \
+Example answer: masterpiece, best quality, highly detailed, solo, old man, grey beard, \
 wrinkled skin, knit cap, wool sweater, sitting, mending net, fishing net, focused, wooden pier, \
 boats, harbor, ocean, dawn, mist, soft lighting, outdoors, full body, from side
 
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn answers_are_tidied_to_one_line_of_tags() {
-        assert_eq!(tidy("\n  \"masterpiece,  best quality, 1boy.\"\nHere you go"), "masterpiece, best quality, 1boy");
+        assert_eq!(tidy("\n  \"masterpiece,  best quality, solo.\"\nHere you go"), "masterpiece, best quality, solo");
         assert_eq!(tidy("`solo, scenery`"), "solo, scenery");
         assert_eq!(tidy(""), "");
         assert_eq!(tidy("calm, cool, calm, Calm, cool,, heroic"), "calm, cool, heroic");

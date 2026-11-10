@@ -95,7 +95,8 @@ a time.
 - **Loopback only.** Listens on `127.0.0.1` and refuses cross-site, DNS-rebinding and
   foreign-origin requests from browsers.
 - **Optional prompt writer.** Point `--writer` at any GGUF Gemma 3 instruct model and the backend
-  turns a short idea into a full tag-style prompt, on the same GPU.
+  turns a short idea into a full tag-style prompt, on the same GPU. With a 12B Q6_K file it needs about 10 GB
+  of GPU memory (measured on an RTX 4090).
 
 ## Examples
 
@@ -267,7 +268,7 @@ rustyui is built from source.
   sentencepiece crate builds with it).
 - Node.js 20 or newer for the editors, and pnpm 11 for `ui/`.
 - For video, the `ffmpeg` program. ComfyUI encodes through PyAV's own FFmpeg 8.1.2 libraries; with
-  those libraries (see [`third_party/ffmpeg-pyav/README.md`](third_party/ffmpeg-pyav/README.md),
+  PyAV's build of those libraries (rustyui now fetches 8.1.3-1, since 8.1.2-1 was withdrawn; see [`third_party/ffmpeg-pyav/README.md`](third_party/ffmpeg-pyav/README.md),
   located by `RUSTYUI_FFMPEG_LIB`) rustyui writes the same packets. Without them it uses the
   system's FFmpeg, whose AAC encoder can differ, and says so once.
 

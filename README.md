@@ -39,7 +39,7 @@ capability 8.9, mostly an RTX 4090 and an RTX 4070 Ti SUPER); other setups are u
   and both editors, and the LTX-2.3 workflows described under
   [How it matches ComfyUI](#how-it-matches-comfyui), checked against ComfyUI as described there.
 - **Partial:** LTX-2.3 (CFG above 1 does not run with guides yet; `t2v` from the command line is
-  silent) and Anima (implemented, not yet checked against ComfyUI).
+  silent; the published fp8 DiT runs but does not match ComfyUI, the bf16 one does) and Anima (implemented, not yet checked against ComfyUI).
 - **Not there yet:** other model families (SD 1.5, SD3, Flux and so on), any node not listed, and
   anything that is not Linux and NVIDIA. See [Limitations and roadmap](#limitations-and-roadmap).
 - There are no release binaries; it is built from source. Expect rough edges and changes.
@@ -187,7 +187,9 @@ The DiT file stores its scale-shift tables as f32; rustyui rounds them to bf16 w
 as ComfyUI does. The fp8 file of the same repository
 (`ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors`) loads and runs, but its
 frames are not ComfyUI's (PSNR 31.5 dB against ComfyUI's on the example above), so use the bf16
-one.
+one. The cause is not known yet: the fp8 linears are checked against torch's on their own (see
+[How it matches ComfyUI](#how-it-matches-comfyui)), but a whole render from this file has not been
+matched.
 
 ## Supported nodes
 
@@ -550,6 +552,12 @@ The three-pass workflow above at 1280x832 (49 frames through all passes, 97 fram
 takes 63 s from a cold start on an RTX 4090, 25 s of that folding the LoRAs and uploading 20 GB of
 DiT blocks; ComfyUI takes 40 s with its models already loaded. The next graph with the same LoRAs
 folds nothing.
+
+Both LTX-2.3 timings above were taken with a DiT file small enough to sit on the 24 GB card whole
+(about 20 GB of blocks), and have not been measured again with the 42 GB bf16 file listed under
+[Supported models](#supported-models). That file does not fit, so its blocks are swapped in and
+out during sampling and it runs slower: the [video example](#examples) (640x448, 153 frames,
+8 steps) takes 46 s, 27 s of it in the steps.
 
 The speed comes from running the kernels PyTorch runs, which also keeps the rounding identical:
 FlashAttention-2 (trimmed, built with torch's flags and split-KV heuristic), cuDNN convolutions

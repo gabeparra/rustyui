@@ -553,6 +553,10 @@ takes 63 s from a cold start on an RTX 4090, 25 s of that folding the LoRAs and 
 DiT blocks; ComfyUI takes 40 s with its models already loaded. The next graph with the same LoRAs
 folds nothing.
 
+With the 42 GB bf16 DiT listed under [Supported models](#supported-models) these take longer, since
+it does not fit on a 24 GB card whole: the [video example](#examples) (640x448, 153 frames,
+8 steps) takes 46 s, 27 s of it in the steps.
+
 The speed comes from running the kernels PyTorch runs, which also keeps the rounding identical:
 FlashAttention-2 (trimmed, built with torch's flags and split-KV heuristic), cuDNN convolutions
 planned as torch plans them, cuBLASLt linears with the bias in the epilogue, and fused

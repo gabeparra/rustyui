@@ -61,6 +61,7 @@ mod paths;
 mod profile;
 mod progress;
 mod prompt;
+mod qgemma3;
 mod qwen3;
 mod resample;
 mod rife;

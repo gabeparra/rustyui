@@ -36,7 +36,8 @@ Crowson (MIT): https://github.com/crowsonkb/k-diffusion
 `third_party/candle-core` and `third_party/candle-flash-attn` are modified copies of crates from
 https://github.com/huggingface/candle, available under either the MIT license or the Apache License
 2.0. Both texts are in each crate's folder (`LICENSE-MIT`, `LICENSE`). The modifications are marked
-with `rustyui:` comments.
+with `rustyui:` comments. `backend/src/qgemma3.rs` is a modified copy of candle-transformers'
+`quantized_gemma3.rs`, under the same terms.
 
 ## FlashAttention (BSD-3-Clause)
 

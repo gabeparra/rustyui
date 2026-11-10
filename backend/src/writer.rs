@@ -1,20 +1,20 @@
 //! The prompt writer: a short idea in, a whole SDXL prompt (comma-separated tags) out, written by an
 //! LLM inside the backend, on the card.
 //!
-//! The model is any GGUF Gemma 3 instruct model, run by candle's quantized Gemma 3 (llama.cpp's
-//! formats, so a Q4_K_M or Q6_K file is used as it is). The tokenizer is Gemma 3's SentencePiece
+//! The model is any GGUF Gemma 3 instruct model, run by a copy of candle's quantized Gemma 3 (`qgemma3`;
+//! llama.cpp's formats, so a Q4_K_M or Q6_K file is used as it is). The tokenizer is Gemma 3's SentencePiece
 //! model, read from the LTX-2.3 Gemma text-encoder file that carries it ("spiece_model"); Gemma 3
 //! fine-tunes keep Gemma's tokenizer, so the same file serves them all.
 //!
 //! The chat is Gemma's template, assembled from ids as Hugging Face's tokenizer would: the
 //! special tokens by id, the text between them by SentencePiece.
 
+use crate::qgemma3::ModelWeights;
 use anyhow::{bail, Context, Result};
 use candle_core::quantized::gguf_file;
 use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_gemma3::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use sentencepiece::SentencePieceProcessor;
 use std::path::Path;

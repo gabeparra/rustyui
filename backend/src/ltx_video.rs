@@ -277,21 +277,21 @@ pub fn debug_i2v(ckpt: &Path, reference: &Path, start: &Path, vae: &Path, ancest
 }
 
 /// The ffmpeg program on the libraries ComfyUI encodes with: PyAV's own build of FFmpeg 8.1.2 and
-/// x264 (pyav-ffmpeg 8.1.2-1, third_party/ffmpeg-pyav/README.md), the system's program running on
+/// x264 (now pyav-ffmpeg 8.1.3-1, third_party/ffmpeg-pyav/README.md), the system's program running on
 /// them (FFmpeg keeps its ABI within a major version). The system's FFmpeg 8.0.1 AAC encoder writes
-/// other packets for some sound. They are looked for in ~/.local/ffmpeg-8.1.2-pyav/lib, or where
+/// other packets for some sound. They are looked for in ~/.local/ffmpeg-8.1.3-pyav/lib, or where
 /// RUSTYUI_FFMPEG_LIB says; without them the system's libraries encode, and that is said once.
 pub fn ffmpeg() -> std::process::Command {
     static LIB: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     let lib = LIB.get_or_init(|| {
         let dir = match std::env::var_os("RUSTYUI_FFMPEG_LIB") {
             Some(d) => PathBuf::from(d),
-            None => Path::new(&std::env::var_os("HOME")?).join(".local/ffmpeg-8.1.2-pyav/lib"),
+            None => Path::new(&std::env::var_os("HOME")?).join(".local/ffmpeg-8.1.3-pyav/lib"),
         };
         if dir.join("libavcodec.so.62").exists() {
             Some(dir)
         } else {
-            eprintln!("[engine] no FFmpeg 8.1.2 (PyAV's build) in {}: the system's FFmpeg encodes, and its AAC can differ from ComfyUI's (third_party/ffmpeg-pyav/README.md)", dir.display());
+            eprintln!("[engine] no FFmpeg 8.1.3 (PyAV's build) in {}: the system's FFmpeg encodes, and its AAC can differ from ComfyUI's (third_party/ffmpeg-pyav/README.md)", dir.display());
             None
         }
     });

@@ -5,7 +5,7 @@
 # and runs it (dev/run.sh); a Docker with NVIDIA's runtime would take it as it is.
 #
 # What decides rustyui's numbers is pinned to the file: the CUDA 12.9 toolkit (conda's explicit
-# list, dev/cuda-12.9.lock), cuDNN 9.19.0.56, MKL 2024.2.0, IPP ICV 2026.0.0, PyAV's FFmpeg 8.1.2
+# list, dev/cuda-12.9.lock), cuDNN 9.19.0.56, MKL 2024.2.0, IPP ICV 2026.0.0, PyAV's FFmpeg 8.1.3
 # libraries, Rust 1.99.0. The rest (compilers for the C crates, cmake, the ffmpeg program) comes from Ubuntu's
 # archive as it stood on SNAPSHOT.
 FROM docker.io/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7
@@ -61,10 +61,11 @@ RUN mkdir -p /tmp/mkl && cd /tmp/mkl && B=https://apt.repos.intel.com/oneapi/poo
  && for f in *.deb; do dpkg-deb -x "$f" $HOME/.local/intel-mkl-2024.2.0; done \
  && cd / && rm -rf /tmp/mkl
 
-# FFmpeg 8.1.2 as PyAV builds it, the libraries ComfyUI encodes with (third_party/ffmpeg-pyav)
-RUN curl -fsSLo /tmp/ffmpeg.tgz https://github.com/PyAV-Org/pyav-ffmpeg/releases/download/8.1.2-1/ffmpeg-manylinux-x86_64.tar.gz \
- && echo "665b4903251dc753725e9cf64615c1af7708b932fb26bf16356acc77d76e95f8  /tmp/ffmpeg.tgz" | sha256sum -c \
- && mkdir -p .local/ffmpeg-8.1.2-pyav && tar xzf /tmp/ffmpeg.tgz -C .local/ffmpeg-8.1.2-pyav lib \
+# FFmpeg 8.1.3 as PyAV builds it (pyav-ffmpeg withdrew 8.1.2-1, the build ComfyUI's PyAV carries;
+# see third_party/ffmpeg-pyav)
+RUN curl -fsSLo /tmp/ffmpeg.tgz https://github.com/PyAV-Org/pyav-ffmpeg/releases/download/8.1.3-1/ffmpeg-manylinux-x86_64.tar.gz \
+ && echo "4d59bd414a731e2876c0b4cc88f5435385904727d47b0b7da5c5530048423099  /tmp/ffmpeg.tgz" | sha256sum -c \
+ && mkdir -p .local/ffmpeg-8.1.3-pyav && tar xzf /tmp/ffmpeg.tgz -C .local/ffmpeg-8.1.3-pyav lib \
  && rm /tmp/ffmpeg.tgz
 
 # Intel IPP's ICV build, as OpenCV 5.0.0 bundles it (third_party/intel-ippicv)

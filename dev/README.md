@@ -13,7 +13,7 @@ the versions the exactness checks against ComfyUI were made with.
 | cuDNN | 9.19.0.56 (the `nvidia-cudnn-cu12` wheel) | the version the reference ComfyUI runs |
 | Intel MKL | 2024.2.0, static | the build torch 2.11 links (`third_party/intel-mkl`) |
 | Intel IPP ICV | 2026.0.0, static | the build OpenCV 5.0.0 bundles (`third_party/intel-ippicv`) |
-| FFmpeg libraries | 8.1.2, PyAV's build | what ComfyUI encodes video with (`third_party/ffmpeg-pyav`) |
+| FFmpeg libraries | 8.1.3, PyAV's build | what ComfyUI encodes video with (`third_party/ffmpeg-pyav`) |
 | Rust | 1.99.0 | `rust-toolchain.toml` pins the same for builds outside the container |
 | Node, pnpm | 22.23.1, 11.13.1 | the editors |
 

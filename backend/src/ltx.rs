@@ -436,7 +436,10 @@ impl Block {
 
     pub fn load_lora(st: &MmapedSafetensors, index: usize, dev: &Device, loras: Option<&Loras>) -> Result<Self> {
         let p = format!("{DIT}transformer_blocks.{index}.");
-        let t = |n: &str| -> Result<Tensor> { fetch(st, &format!("{p}{n}"), dev) };
+        let t = |n: &str| -> Result<Tensor> {
+            let x = fetch(st, &format!("{p}{n}"), dev)?;
+            Ok(if n.contains("scale_shift_table") { x.to_dtype(DType::BF16)? } else { x })
+        };
         let attn = |n: &str| Attention::load_lora(st, &format!("{p}{n}"), 32, dev, loras);
         Ok(Self {
             attn1: attn("attn1")?,
@@ -872,8 +875,8 @@ impl Dit {
             av_ca_a2v_gate: a("av_ca_a2v_gate_adaln_single")?,
             av_ca_audio_ss: a("av_ca_audio_scale_shift_adaln_single")?,
             av_ca_v2a_gate: a("av_ca_v2a_gate_adaln_single")?,
-            scale_shift_table: st.load(&format!("{DIT}scale_shift_table"), dev)?,
-            audio_scale_shift_table: st.load(&format!("{DIT}audio_scale_shift_table"), dev)?,
+            scale_shift_table: st.load(&format!("{DIT}scale_shift_table"), dev)?.to_dtype(DType::BF16)?,
+            audio_scale_shift_table: st.load(&format!("{DIT}audio_scale_shift_table"), dev)?.to_dtype(DType::BF16)?,
             proj_out: Linear::load(st, &format!("{DIT}proj_out"), dev)?,
             audio_proj_out: Linear::load(st, &format!("{DIT}audio_proj_out"), dev)?,
             expo: sinusoid_exponents(dev)?,

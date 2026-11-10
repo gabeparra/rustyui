@@ -1,0 +1,25 @@
+# rustyui's backend as a systemd user service: ComfyUI's HTTP API and websocket, and the editors at
+# http://127.0.0.1:8190/ (ComfyUI's) and /simple/. Started by rustyui-backend.socket on the first
+# connection; it lets its models go after 90 s without work and exits after 120 s with nothing to do (an open editor's
+# polling keeps it up only until a render's CUDA context would be held for nothing). No [Install]:
+# the socket is what is enabled.
+#
+# Install the binary, then adjust the folders below to yours:
+#   install -Dm755 target/release/rustyui-backend ~/.local/bin/rustyui-backend
+#
+# Optional extras for ExecStart:
+#   --prefix NAME          the SaveImage prefix the editor starts from
+#   --mirror HOST:DIR      copy every render to DIR on HOST (rsync over ssh, never overwriting)
+#   --writer FILE.gguf     the prompt writer (a GGUF Gemma 3 instruct model)
+#   --no-video             images only: the video nodes are neither listed nor run
+[Unit]
+Description=rustyui-backend (ComfyUI-compatible API and editors, 127.0.0.1:8190)
+Requires=rustyui-backend.socket
+After=rustyui-backend.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/rustyui-backend serve --idle 90 --exit-idle 120 --models %h/ComfyUI/models --out %h/ComfyUI/output
+Restart=on-failure
+RestartSec=2
+SyslogIdentifier=rustyui-backend

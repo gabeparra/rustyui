@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simple-editor:
+    name: Simple editor (frontend/)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run build
+      - run: node --experimental-strip-types --test tests/forge.test.ts
+
+  comfyui-editor:
+    name: ComfyUI editor (ui/)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vite build --config vite.config.mts
+
+  backend:
+    name: Backend (fmt, clippy, build, test)
+    runs-on: ubuntu-24.04
+    # Everything the backend links (CUDA 12.9, cuDNN 9.19, Intel MKL and IPP ICV, Rust 1.99) comes
+    # from the pinned dev container. The runner has no GPU and no driver: the code is compiled, and
+    # the unit tests (none of which touch the card) run against the toolkit's libcuda stub.
+    env:
+      IMAGE: rustyui-dev:ci
+    steps:
+      - uses: actions/checkout@v5
+      - name: Free disk space for the CUDA toolchain
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: docker/setup-buildx-action@v3
+      - name: Dev container
+        uses: docker/build-push-action@v6
+        with:
+          context: dev
+          file: dev/Containerfile
+          build-args: DEV_USER=dev
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cargo/registry
+            .ci-cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'backend/build.rs', 'third_party/**/build.rs') }}
+          restore-keys: cargo-
+      - name: fmt, clippy, build, test
+        run: |
+          mkdir -p .ci-cargo/registry .ci-cargo/git
+          docker run --rm --user root -e HOME=/home/dev \
+            -v "$PWD:/src" -w /src \
+            -v "$PWD/.ci-cargo/registry:/home/dev/.cargo/registry" \
+            -v "$PWD/.ci-cargo/git:/home/dev/.cargo/git" \
+            "$IMAGE" sh -euc '
+              rustup component add rustfmt clippy
+              cargo fmt -p rustyui-backend --check
+              cargo clippy --release --locked -p rustyui-backend --no-deps -- -D warnings
+              cargo build --release --locked
+              mkdir -p /tmp/cuda-stub
+              ln -sf "$CUDA_ROOT/lib/stubs/libcuda.so" /tmp/cuda-stub/libcuda.so.1
+              LD_LIBRARY_PATH=/tmp/cuda-stub cargo test --release --locked -p rustyui-backend
+            '

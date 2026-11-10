@@ -1,0 +1,95 @@
+# rustyui's development and build environment, every version pinned, installed under the user's
+# ~/.local (the layout backend/build.rs looks in first). Built with DEV_USER set to the host's user
+# name (dev/build-image.sh does), the paths match a host with the same layout, so a binary built in
+# here also runs there (its rpath names those paths). Rootless podman builds it (dev/build-image.sh, the context being dev/)
+# and runs it (dev/run.sh); a Docker with NVIDIA's runtime would take it as it is.
+#
+# What decides rustyui's numbers is pinned to the file: the CUDA 12.9 toolkit (conda's explicit
+# list, dev/cuda-12.9.lock), cuDNN 9.19.0.56, MKL 2024.2.0, IPP ICV 2026.0.0, PyAV's FFmpeg 8.1.2
+# libraries, Rust 1.99.0. The rest (compilers for the C crates, cmake, the ffmpeg program) comes from Ubuntu's
+# archive as it stood on SNAPSHOT.
+FROM docker.io/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7
+ARG DEV_USER=dev
+
+ARG SNAPSHOT=20261015T120000Z
+# the snapshot is served over HTTPS, which the bare image cannot check until it has CA certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get update --snapshot "$SNAPSHOT" \
+ && apt-get install --snapshot "$SNAPSHOT" -y --no-install-recommends \
+      build-essential cmake pkg-config git curl ca-certificates ffmpeg unzip xz-utils zstd bzip2 \
+ && dpkg-query -W > /etc/rustyui-dev-packages.txt \
+ && rm -rf /var/lib/apt/lists/*
+
+# the build user, uid 1000, as on the host (podman's --userns=keep-id maps one to the other)
+RUN userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash "$DEV_USER"
+USER ${DEV_USER}
+WORKDIR /home/${DEV_USER}
+ENV HOME=/home/${DEV_USER}
+
+# the CUDA 12.9 toolkit and the gcc 14 nvcc compiles with: conda-forge's packages, as listed
+COPY --chown=1000:1000 cuda-12.9.lock /tmp/cuda-12.9.lock
+RUN curl -fsSLo /tmp/micromamba https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-linux-64 \
+ && echo "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3  /tmp/micromamba" | sha256sum -c \
+ && chmod +x /tmp/micromamba \
+ && /tmp/micromamba create -y -q -r /tmp/mamba -p $HOME/.local/cuda-12.9 --file /tmp/cuda-12.9.lock \
+ && rm -rf /tmp/micromamba /tmp/mamba /tmp/cuda-12.9.lock
+
+# cuDNN 9.19, the version the reference ComfyUI runs: the nvidia-cudnn-cu12 wheel's libraries and headers
+RUN curl -fsSLo /tmp/cudnn.whl https://files.pythonhosted.org/packages/c5/41/65225d42fba06fb3dd3972485ea258e7dd07a40d6e01c95da6766ad87354/nvidia_cudnn_cu12-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl \
+ && echo "ac6ad90a075bb33a94f2b4cf4622eac13dd4dc65cf6dd9c7572a318516a36625  /tmp/cudnn.whl" | sha256sum -c \
+ && unzip -q /tmp/cudnn.whl 'nvidia/cudnn/*' 'nvidia_cudnn_cu12-9.19.0.56.dist-info/licenses/License.txt' -d /tmp/cudnn \
+ && mkdir -p .local/cudnn-9.19.0-cu12 \
+ && mv /tmp/cudnn/nvidia/cudnn/lib /tmp/cudnn/nvidia/cudnn/include .local/cudnn-9.19.0-cu12/ \
+ && mv /tmp/cudnn/nvidia_cudnn_cu12-9.19.0.56.dist-info/licenses/License.txt .local/cudnn-9.19.0-cu12/ \
+ && cd .local/cudnn-9.19.0-cu12/lib && for f in *.so.9; do ln -s "$f" "${f%.9}"; done \
+ && rm -rf /tmp/cudnn /tmp/cudnn.whl
+
+# MKL 2024.2.0, the build torch 2.11 links (third_party/intel-mkl/README.md)
+RUN mkdir -p /tmp/mkl && cd /tmp/mkl && B=https://apt.repos.intel.com/oneapi/pool/main \
+ && for f in intel-oneapi-mkl-core-2024.2-2024.2.0-663_amd64.deb \
+             intel-oneapi-mkl-core-devel-2024.2-2024.2.0-663_amd64.deb \
+             intel-oneapi-mkl-classic-include-2024.2-2024.2.0-663_amd64.deb \
+             intel-oneapi-mkl-classic-include-common-2024.2-2024.2.0-663_all.deb \
+             intel-oneapi-common-licensing-2024.2-2024.2.0-589_all.deb; do curl -fsSO "$B/$f"; done \
+ && printf '%s\n' \
+      "970f620c81941e738000bb1d247138512001951cf70fd3f7989c29bc6f267d16  intel-oneapi-mkl-core-2024.2-2024.2.0-663_amd64.deb" \
+      "f2ab7f78792b078896c8f46e26eaafddd040c5a952dd5d7785c766c9f790ac94  intel-oneapi-mkl-core-devel-2024.2-2024.2.0-663_amd64.deb" \
+      "c94cdf606963b0d2329ce9eebabf248cc1e4aaea55849a5477efd9eda0a68947  intel-oneapi-mkl-classic-include-2024.2-2024.2.0-663_amd64.deb" \
+      "7091ad52eb772c3e1e85c10f00d25d6cd05206dc4b2f21e0560a881cf7f318cf  intel-oneapi-mkl-classic-include-common-2024.2-2024.2.0-663_all.deb" \
+      "f4e94cbbacd38d7e75067419d53a71cbb9de8fdac6fdd438977d2f6fc0e87e4b  intel-oneapi-common-licensing-2024.2-2024.2.0-589_all.deb" \
+    | sha256sum -c \
+ && for f in *.deb; do dpkg-deb -x "$f" $HOME/.local/intel-mkl-2024.2.0; done \
+ && cd / && rm -rf /tmp/mkl
+
+# FFmpeg 8.1.2 as PyAV builds it, the libraries ComfyUI encodes with (third_party/ffmpeg-pyav)
+RUN curl -fsSLo /tmp/ffmpeg.tgz https://github.com/PyAV-Org/pyav-ffmpeg/releases/download/8.1.2-1/ffmpeg-manylinux-x86_64.tar.gz \
+ && echo "665b4903251dc753725e9cf64615c1af7708b932fb26bf16356acc77d76e95f8  /tmp/ffmpeg.tgz" | sha256sum -c \
+ && mkdir -p .local/ffmpeg-8.1.2-pyav && tar xzf /tmp/ffmpeg.tgz -C .local/ffmpeg-8.1.2-pyav lib \
+ && rm /tmp/ffmpeg.tgz
+
+# Intel IPP's ICV build, as OpenCV 5.0.0 bundles it (third_party/intel-ippicv)
+RUN curl -fsSLo /tmp/ippicv.tgz https://raw.githubusercontent.com/opencv/opencv_3rdparty/406d398c436d0465c8e53dd432d9ecd9301d5f4a/ippicv/ippicv_2026.0.0_lnx_intel64_20260327_general.tgz \
+ && echo "5198d6f76e61d5aa0fa5dde72cc22947af1a86efbf49d08b90d374699c811fd0  /tmp/ippicv.tgz" | sha256sum -c \
+ && mkdir -p .local/ippicv-2026.0.0 && tar xzf /tmp/ippicv.tgz -C .local/ippicv-2026.0.0 \
+ && rm /tmp/ippicv.tgz
+
+# Node for the editors, pnpm for ui/
+RUN curl -fsSLo /tmp/node.txz https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz \
+ && echo "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578  /tmp/node.txz" | sha256sum -c \
+ && mkdir -p .local/node && tar xJf /tmp/node.txz -C .local/node --strip-components=1 \
+ && rm /tmp/node.txz \
+ && PATH=$HOME/.local/node/bin:$PATH npm install -g --prefix $HOME/.local/pnpm11 pnpm@11.13.1
+
+# Rust 1.99.0
+RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init \
+ && echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  /tmp/rustup-init" | sha256sum -c \
+ && chmod +x /tmp/rustup-init && /tmp/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain 1.99.0 \
+ && rm /tmp/rustup-init
+
+ENV PATH=/home/${DEV_USER}/.local/cuda-12.9/bin:/home/${DEV_USER}/.cargo/bin:/home/${DEV_USER}/.local/node/bin:/home/${DEV_USER}/.local/pnpm11/bin:/usr/local/bin:/usr/bin:/bin
+# nvcc compiles host code with conda's gcc 14 (the system's is newer than CUDA 12.9 accepts), for
+# candle's and flash-attention's kernels as well as rustyui's own
+ENV CUDA_ROOT=/home/${DEV_USER}/.local/cuda-12.9 \
+    CUDA_COMPUTE_CAP=89 \
+    NVCC_PREPEND_FLAGS="-ccbin /home/${DEV_USER}/.local/cuda-12.9/bin/x86_64-conda-linux-gnu-g++"
+WORKDIR /home/${DEV_USER}/rustyui

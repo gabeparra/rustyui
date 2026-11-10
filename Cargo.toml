@@ -1,0 +1,18 @@
+# rustyui: what ComfyUI does, in Rust. Two programs, as ComfyUI has them:
+#   backend/   rustyui-backend, the server: loads the models, runs the graphs, answers ComfyUI's
+#              HTTP API on 127.0.0.1:8190 and serves the editor there
+#   frontend/  the node editor that runs in the browser (HTML, CSS, JavaScript; compiled into the
+#              backend, or served live with `rustyui-backend serve --frontend frontend`)
+[workspace]
+members = ["backend"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+debug = false
+
+# candle-core with three changes: half-precision cuDNN convolutions accumulate in f32 (PyTorch does),
+# cuda_backend::clear_param_cache, so the backend can let the card go when idle, and a .pt file's
+# complex64 tensors read as f32 with a trailing (real, imaginary) dim (SAM3's RoPE tables)
+[patch.crates-io]
+candle-core = { path = "third_party/candle-core" }

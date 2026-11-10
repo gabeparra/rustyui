@@ -1,0 +1,16 @@
+name: Feature request
+description: A node, a model family, or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like
+      description: For a node or model, link the ComfyUI node or code it should match.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The workflow it would enable.

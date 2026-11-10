@@ -1,0 +1,520 @@
+/* The Forge-style editor: Gradio's dark theme as Forge wears it (deep navy page, grey blocks,
+   an orange Generate), laid out in two columns that stack on a phone. */
+:root {
+  --f-bg: #0b0f19;
+  --f-block: #1f2937;
+  --f-input: #374151;
+  --f-border: #374151;
+  --f-border-strong: #4b5563;
+  --f-text: #e5e7eb;
+  --f-muted: #9ca3af;
+  --f-accent: #f97316;
+  --f-accent-dark: #ea580c;
+  --f-radius: 8px;
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--f-bg);
+}
+
+.forge {
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: 10px 16px 40px;
+  color: var(--f-text);
+  font: 14px/1.4 'Source Sans Pro', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+.forge *,
+.forge *::before,
+.forge *::after {
+  box-sizing: border-box;
+}
+
+.forge select,
+.forge input[type='number'],
+.forge input:not([type]),
+.forge textarea {
+  width: 100%;
+  background: var(--f-input);
+  color: var(--f-text);
+  border: 1px solid var(--f-border-strong);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.forge textarea {
+  resize: vertical;
+  min-height: 74px;
+}
+.forge select:focus,
+.forge input:focus,
+.forge textarea:focus {
+  outline: none;
+  border-color: var(--f-accent);
+  box-shadow: 0 0 0 1px var(--f-accent);
+}
+
+.forge button {
+  font: inherit;
+  cursor: pointer;
+}
+
+/* the quick settings bar: the checkpoint, clip skip */
+.quick {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.quick-ckpt {
+  flex: 0 1 420px;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--f-muted);
+  font-size: 13px;
+}
+.quick-skip {
+  flex: 0 1 220px;
+  min-width: 160px;
+}
+.quick-links {
+  margin-left: auto;
+  display: flex;
+  gap: 14px;
+}
+.quick-links a {
+  color: var(--f-muted);
+  text-decoration: none;
+  font-size: 13px;
+}
+.quick-links a:hover {
+  color: var(--f-accent);
+}
+.with-tool {
+  display: flex;
+  gap: 6px;
+}
+
+/* tabs, Gradio's: plain text, the open one underlined in orange */
+.tabs,
+.subtabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--f-border);
+  margin-bottom: 10px;
+  overflow-x: auto;
+}
+.tabs button,
+.subtabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--f-muted);
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+.tabs button.on,
+.subtabs button.on {
+  color: var(--f-text);
+  border-bottom-color: var(--f-accent);
+}
+.subtabs {
+  margin-top: 10px;
+}
+
+/* the prompts beside Generate */
+.toprow {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 10px;
+}
+.prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.generate-box {
+  display: flex;
+  gap: 6px;
+  min-height: 78px;
+}
+.generate-box button {
+  flex: 1;
+  border: 0;
+  border-radius: var(--f-radius);
+  font-size: 18px;
+  font-weight: 600;
+}
+.generate {
+  color: #fff;
+  background: linear-gradient(to bottom right, #fb923c, var(--f-accent-dark));
+}
+.generate:hover {
+  filter: brightness(1.08);
+}
+.interrupt,
+.skip {
+  color: var(--f-text);
+  background: var(--f-input);
+}
+.interrupt:hover {
+  background: #7f1d1d;
+}
+.tools {
+  display: flex;
+  gap: 6px;
+}
+.idea {
+  display: flex;
+  gap: 6px;
+}
+.idea button {
+  border: 0;
+  border-radius: 6px;
+  padding: 0 10px;
+  color: #fff;
+  background: var(--f-accent-dark);
+}
+.idea button:disabled {
+  opacity: 0.6;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 6px;
+  border: 1px solid var(--f-border-strong);
+  border-radius: 6px;
+  background: var(--f-block);
+  color: var(--f-text);
+  text-decoration: none;
+  font-size: 16px;
+}
+.tool:hover {
+  border-color: var(--f-accent);
+}
+.tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* the two columns */
+.cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.settings,
+.output {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.block {
+  background: var(--f-block);
+  border: 1px solid var(--f-border);
+  border-radius: var(--f-radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.row > * {
+  flex: 1 1 140px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--f-muted);
+  font-size: 13px;
+}
+.field.grow {
+  flex: 1 1 200px;
+}
+.row.seed > .tool {
+  flex: 0 0 auto;
+}
+
+/* Forge's sliders: the label and its number on a line, the range under it */
+.fslider {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.fslider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--f-muted);
+  font-size: 13px;
+}
+.forge .fslider-num {
+  width: 84px;
+  padding: 2px 6px;
+  text-align: right;
+}
+.fslider-range {
+  width: 100%;
+  accent-color: var(--f-accent);
+  margin: 4px 0 0;
+}
+
+.accordion .acc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.accordion .acc-head input {
+  accent-color: var(--f-accent);
+  width: 16px;
+  height: 16px;
+}
+.acc-note {
+  margin-left: auto;
+  color: var(--f-muted);
+  font-weight: 400;
+  font-size: 13px;
+}
+.acc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.size {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.size-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.size > .swap {
+  flex: 0 0 auto;
+}
+
+/* the gallery and its infotext */
+.gallery {
+  position: relative;
+  min-height: 420px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.gallery img {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.gallery .empty {
+  color: var(--f-muted);
+}
+.progress {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 12px;
+  height: 22px;
+  background: rgba(17, 24, 39, 0.85);
+  border-radius: 11px;
+  overflow: hidden;
+}
+.progress .bar {
+  height: 100%;
+  background: linear-gradient(to right, #fb923c, var(--f-accent-dark));
+  transition: width 0.3s;
+}
+.progress span {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #fff;
+}
+.thumbs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.thumbs img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.thumbs img.on {
+  border-color: var(--f-accent);
+}
+.out-buttons {
+  display: flex;
+  gap: 6px;
+}
+.infotext {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--f-block);
+  border: 1px solid var(--f-border);
+  border-radius: var(--f-radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--f-text);
+}
+.kind {
+  color: var(--f-muted);
+  font-size: 13px;
+}
+.notes {
+  color: var(--f-muted);
+  font-size: 13px;
+}
+.notes ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  color: var(--f-text);
+}
+.send {
+  border: 1px solid var(--f-border-strong);
+  border-radius: 6px;
+  background: var(--f-input);
+  color: var(--f-text);
+  padding: 8px 12px;
+}
+.send:hover {
+  border-color: var(--f-accent);
+}
+.send.replay {
+  background: var(--f-accent-dark);
+  border-color: var(--f-accent);
+  color: #fff;
+}
+.send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* dropping a picture in */
+.drop {
+  align-items: center;
+  min-height: 160px;
+  justify-content: center;
+}
+.drop img {
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+}
+.drop-hint {
+  color: var(--f-muted);
+  cursor: pointer;
+}
+.drop-hint input {
+  display: none;
+}
+
+/* LoRAs */
+.filter {
+  margin-bottom: 4px;
+}
+.loras {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+  max-height: 70vh;
+  overflow: auto;
+}
+.lora {
+  text-align: left;
+  border: 1px solid var(--f-border-strong);
+  border-radius: 6px;
+  background: var(--f-input);
+  color: var(--f-text);
+  padding: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lora:hover {
+  border-color: var(--f-accent);
+}
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+  max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  padding: 10px 14px;
+  border-radius: var(--f-radius);
+  background: var(--f-block);
+  border: 1px solid var(--f-border-strong);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.toast.error {
+  border-color: #b91c1c;
+}
+.toast.ok {
+  border-color: #15803d;
+}
+.toast.warn {
+  border-color: #ca8a04;
+}
+
+/* a phone: one column, Generate under the prompts */
+@media (max-width: 900px) {
+  .forge {
+    padding: 8px 12px 32px;
+  }
+  .toprow,
+  .cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .generate-box {
+    min-height: 56px;
+  }
+  .gallery {
+    min-height: 280px;
+  }
+  .quick-links {
+    margin-left: 0;
+  }
+}

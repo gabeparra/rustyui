@@ -1,0 +1,15 @@
+# rustyui's port, 127.0.0.1:8190, held by systemd: the first connection starts
+# rustyui-backend.service, which exits after two idle minutes, so the backend costs nothing at all
+# between uses. Loopback only (the backend also refuses a socket on any other address).
+# Install (from the repo root):
+#   cp deploy/rustyui-backend.socket deploy/rustyui-backend.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now rustyui-backend.socket
+[Unit]
+Description=rustyui-backend's port (127.0.0.1:8190, started on demand)
+
+[Socket]
+ListenStream=127.0.0.1:8190
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,24 @@
+{
+  "name": "rustyui-frontend",
+  "private": true,
+  "version": "0.2.0",
+  "description": "rustyui's node editor: TypeScript, Vue 3 and LiteGraph, built by Vite into dist/, which rustyui-backend serves",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@comfyorg/litegraph": "^0.17.2",
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vue-tsc": "^3.3.13"
+  },
+  "trustedDependencies": []
+}

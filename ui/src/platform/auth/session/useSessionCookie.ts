@@ -1,0 +1,180 @@
+import { isCloud } from '@/platform/distribution/types'
+import { reportError } from '@/platform/telemetry/reportError'
+import { api } from '@/scripts/api'
+import { useAuthStore } from '@/stores/authStore'
+
+interface InFlightCreateSession {
+  ownerUid: string | null
+  promise: Promise<void>
+}
+
+let inFlightCreateSession: InFlightCreateSession | null = null
+let confirmedSessionOwnerUid: string | null = null
+let sessionMutationTail = Promise.resolve()
+let pendingSessionMutations = 0
+
+/**
+ * Session cookie management for cloud authentication.
+ * Creates and deletes session cookies on the ComfyUI server.
+ */
+export const useSessionCookie = () => {
+  const createSessionWithHeader = async (
+    authHeader: Record<string, string>
+  ): Promise<Response> => {
+    return await fetch(api.apiURL('/auth/session'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...authHeader,
+        'Content-Type': 'application/json'
+      }
+    })
+  }
+
+  const readSessionError = async (response: Response): Promise<string> => {
+    const errorData: unknown = await response.json().catch(() => null)
+    const message = (errorData as { message?: unknown } | null)?.message
+    return typeof message === 'string' ? message : response.statusText
+  }
+
+  const getSessionHeaderOrThrow = async (): Promise<Record<string, string>> => {
+    const authStore = useAuthStore()
+    const firebaseToken = await authStore.getIdToken()
+    if (!firebaseToken) {
+      throw new Error('No Firebase token available for session creation')
+    }
+
+    return { Authorization: `Bearer ${firebaseToken}` }
+  }
+
+  /** Creates or refreshes the session cookie after login or token refresh. */
+  const performCreateSession = async (
+    expectedOwnerUid: string
+  ): Promise<void> => {
+    const authStore = useAuthStore()
+    const authHeader = await getSessionHeaderOrThrow()
+
+    if ((authStore.currentUser?.uid ?? null) !== expectedOwnerUid) {
+      throw new Error('Session identity changed during creation')
+    }
+
+    const response = await createSessionWithHeader(authHeader)
+
+    if (!response.ok) {
+      throw new Error(await readSessionError(response))
+    }
+  }
+
+  const establishSession = (
+    ownerUid: string,
+    forceRefresh: boolean
+  ): Promise<void> => {
+    if (
+      !forceRefresh &&
+      pendingSessionMutations === 0 &&
+      confirmedSessionOwnerUid === ownerUid
+    ) {
+      return Promise.resolve()
+    }
+    if (inFlightCreateSession?.ownerUid === ownerUid) {
+      return inFlightCreateSession.promise
+    }
+
+    pendingSessionMutations++
+    const request: InFlightCreateSession = {
+      ownerUid,
+      promise: sessionMutationTail
+        .then(async () => {
+          if ((useAuthStore().currentUser?.uid ?? null) !== ownerUid) {
+            throw new Error('Session identity changed before creation')
+          }
+          await performCreateSession(ownerUid)
+          confirmedSessionOwnerUid = ownerUid
+          if ((useAuthStore().currentUser?.uid ?? null) !== ownerUid) {
+            throw new Error('Session identity changed during creation')
+          }
+        })
+        .finally(() => {
+          pendingSessionMutations--
+          if (inFlightCreateSession === request) {
+            inFlightCreateSession = null
+          }
+        })
+    }
+    inFlightCreateSession = request
+    sessionMutationTail = request.promise.catch(() => {})
+    return request.promise
+  }
+
+  const currentOwnerUidOrThrow = (): string => {
+    const ownerUid = useAuthStore().currentUser?.uid
+    if (!ownerUid) {
+      throw new Error('No authenticated user available for session creation')
+    }
+    return ownerUid
+  }
+
+  const ensureSessionCookie = async (): Promise<void> => {
+    if (!isCloud) return
+    await establishSession(currentOwnerUidOrThrow(), false)
+  }
+
+  const createSession = async (): Promise<void> => {
+    if (!isCloud) return
+    try {
+      await establishSession(currentOwnerUidOrThrow(), true)
+    } catch (error) {
+      // The session cookie is the only credential <img>/media loads carry, so
+      // a swallowed creation failure means images break with no other signal.
+      reportError(error, {
+        errorType: 'session_cookie_creation_failure',
+        level: 'warning'
+      })
+    }
+  }
+
+  const createSessionOrThrow = async (): Promise<void> => {
+    if (!isCloud) return
+    await establishSession(currentOwnerUidOrThrow(), true)
+  }
+
+  /**
+   * Deletes the session cookie.
+   * Called on logout.
+   */
+  const deleteSession = async (): Promise<void> => {
+    if (!isCloud) return
+    confirmedSessionOwnerUid = null
+    inFlightCreateSession = null
+
+    try {
+      pendingSessionMutations++
+      const deleteRequest = sessionMutationTail
+        .then(async () => {
+          const response = await fetch(api.apiURL('/auth/session'), {
+            method: 'DELETE',
+            credentials: 'include'
+          })
+
+          if (!response.ok) {
+            throw new Error(await readSessionError(response))
+          }
+          confirmedSessionOwnerUid = null
+        })
+        .finally(() => {
+          pendingSessionMutations--
+        })
+      sessionMutationTail = deleteRequest.catch(() => {})
+      await deleteRequest
+    } catch (error) {
+      console.warn('Failed to delete session cookie:', error)
+    }
+  }
+
+  return {
+    createSession,
+    createSessionOrThrow,
+    ensureSessionCookie,
+    deleteSession
+  }
+}

@@ -1,0 +1,171 @@
+{
+ "1": {
+  "class_type": "CheckpointLoaderSimple",
+  "inputs": {
+   "ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+  }
+ },
+ "10": {
+  "class_type": "ImageScale",
+  "inputs": {
+   "crop": "disabled",
+   "height": 1248,
+   "image": [
+    "9",
+    0
+   ],
+   "upscale_method": "lanczos",
+   "width": 1824
+  }
+ },
+ "11": {
+  "class_type": "VAEEncode",
+  "inputs": {
+   "pixels": [
+    "10",
+    0
+   ],
+   "vae": [
+    "1",
+    2
+   ]
+  }
+ },
+ "12": {
+  "class_type": "KSampler",
+  "inputs": {
+   "cfg": 5,
+   "denoise": 0.4,
+   "latent_image": [
+    "11",
+    0
+   ],
+   "model": [
+    "1",
+    0
+   ],
+   "negative": [
+    "3",
+    0
+   ],
+   "positive": [
+    "2",
+    0
+   ],
+   "sampler_name": "dpmpp_2m",
+   "scheduler": "karras",
+   "seed": 20261014,
+   "steps": 15
+  }
+ },
+ "13": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "12",
+    0
+   ],
+   "vae": [
+    "1",
+    2
+   ]
+  }
+ },
+ "2": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "1",
+    1
+   ],
+   "text": "a lighthouse on a rocky shore at dawn, soft golden light, waves, highly detailed"
+  }
+ },
+ "3": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "1",
+    1
+   ],
+   "text": "text, watermark, blurry, lowres"
+  }
+ },
+ "4": {
+  "class_type": "EmptyLatentImage",
+  "inputs": {
+   "batch_size": 1,
+   "height": 832,
+   "width": 1216
+  }
+ },
+ "5": {
+  "class_type": "KSampler",
+  "inputs": {
+   "cfg": 5,
+   "denoise": 1,
+   "latent_image": [
+    "4",
+    0
+   ],
+   "model": [
+    "1",
+    0
+   ],
+   "negative": [
+    "3",
+    0
+   ],
+   "positive": [
+    "2",
+    0
+   ],
+   "sampler_name": "dpmpp_2m",
+   "scheduler": "karras",
+   "seed": 20261014,
+   "steps": 30
+  }
+ },
+ "6": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "5",
+    0
+   ],
+   "vae": [
+    "1",
+    2
+   ]
+  }
+ },
+ "7": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "filename_prefix": "rustyui-readme/lighthouse-hires",
+   "images": [
+    "13",
+    0
+   ]
+  }
+ },
+ "8": {
+  "class_type": "UpscaleModelLoader",
+  "inputs": {
+   "model_name": "4x_foolhardy_Remacri.pth"
+  }
+ },
+ "9": {
+  "class_type": "ImageUpscaleWithModel",
+  "inputs": {
+   "image": [
+    "6",
+    0
+   ],
+   "upscale_model": [
+    "8",
+    0
+   ]
+  }
+ }
+}

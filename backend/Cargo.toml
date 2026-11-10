@@ -1,0 +1,36 @@
+[package]
+name = "rustyui-backend"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/gabeparra/rustyui"
+description = "rustyui's backend: runs ComfyUI API graphs in Rust on candle (SDXL; LTX-2.3 in progress), serves ComfyUI's HTTP API and the node editor"
+
+[dependencies]
+candle-core = { version = "0.11", features = ["cuda", "cudnn"] }
+candle-nn = { version = "0.11", features = ["cuda", "cudnn"] }
+# the prompt writer: a quantized (GGUF) Gemma 3, as candle runs llama.cpp's formats
+candle-transformers = "0.11"
+# vendored, trimmed to the kernels used and built with torch's flags (third_party/candle-flash-attn/build.rs)
+candle-flash-attn = { path = "../third_party/candle-flash-attn" }
+half = "2"
+anyhow = "1"
+memmap2 = "0.9"
+safetensors = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+png = "0.17"
+tiny_http = "0.12"
+tungstenite = "0.24"
+# Gemma's tokenizer: the real SentencePiece library, so ids match ComfyUI's Python one exactly
+sentencepiece = "0.14"
+# Anima's Qwen3 and T5 tokenizers: the release transformers 5 runs them with in ComfyUI's venv, with
+# its Oniguruma regexes (the Python package's default); the training-only features left out
+tokenizers = { version = "=0.23.1", default-features = false, features = ["onig"] }
+ureq = { version = "2", default-features = false, features = ["json"] }
+# dlopen, to load NVRTC by path before cuDNN looks for it (src/kernels.rs: preload_nvrtc)
+libc = "0.2"
+
+[build-dependencies]
+# kernels/sdpa.cpp: cuDNN's attention through cudnn-frontend (third_party/cudnn-frontend)
+cc = "1"

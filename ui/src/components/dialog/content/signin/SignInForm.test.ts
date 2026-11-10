@@ -1,0 +1,170 @@
+import { Form } from '@primevue/forms'
+import userEvent from '@testing-library/user-event'
+import { render, screen } from '@testing-library/vue'
+import PrimeVue from 'primevue/config'
+import InputText from 'primevue/inputtext'
+import Password from 'primevue/password'
+import ToastService from 'primevue/toastservice'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createI18n } from 'vue-i18n'
+
+import Button from '@/components/ui/button/Button.vue'
+import Spinner from '@/components/ui/spinner/Spinner.vue'
+import { useAuthActions } from '@/composables/auth/useAuthActions'
+import enMessages from '@/locales/en/main.json' with { type: 'json' }
+import { useAuthStore } from '@/stores/authStore'
+
+import SignInForm from './SignInForm.vue'
+vi.mock(import('firebase/auth'))
+
+// Mock the auth composables and stores
+vi.mock(import('@/composables/auth/useAuthActions'))
+
+// Mock toast
+const mockToastAdd = vi.fn()
+vi.mock<unknown>(import('primevue/usetoast'), () => ({
+  useToast: vi.fn(() => ({
+    add: mockToastAdd
+  }))
+}))
+
+const forgotPasswordText = enMessages.auth.login.forgotPassword
+const loginButtonText = enMessages.auth.login.loginButton
+
+describe('SignInForm', () => {
+  beforeEach(() => {
+    useAuthStore().loading = false
+  })
+
+  function renderComponent(props: Record<string, unknown> = {}) {
+    const i18n = createI18n({
+      legacy: false,
+      locale: 'en',
+      messages: { en: enMessages }
+    })
+    const user = userEvent.setup()
+    const result = render(SignInForm, {
+      global: {
+        plugins: [PrimeVue, i18n, ToastService],
+        components: { Form, Button, InputText, Password, Spinner }
+      },
+      props
+    })
+    return { ...result, user }
+  }
+
+  function getEmailInput() {
+    return screen.getByPlaceholderText(enMessages.auth.login.emailPlaceholder)
+  }
+
+  function getPasswordInput() {
+    return screen.getByPlaceholderText(
+      enMessages.auth.login.passwordPlaceholder
+    )
+  }
+
+  describe('Forgot Password Link', () => {
+    it('shows toast and focuses email input when clicked while disabled', async () => {
+      const { user } = renderComponent()
+
+      const emailInput = getEmailInput()
+      const focusSpy = vi.spyOn(emailInput, 'focus')
+
+      await user.click(screen.getByText(forgotPasswordText))
+
+      expect(mockToastAdd).toHaveBeenCalledWith({
+        severity: 'warn',
+        summary: enMessages.auth.login.emailPlaceholder,
+        life: 5000
+      })
+
+      expect(focusSpy).toHaveBeenCalled()
+
+      expect(useAuthActions().sendPasswordReset).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Form Submission', () => {
+    it('emits submit event when form is submitted with valid data', async () => {
+      const onSubmit = vi.fn()
+      const { user } = renderComponent({ onSubmit })
+
+      await user.type(getEmailInput(), 'test@example.com')
+      await user.type(getPasswordInput(), 'password123')
+      await user.click(screen.getByRole('button', { name: loginButtonText }))
+
+      expect(onSubmit).toHaveBeenCalledWith({
+        email: 'test@example.com',
+        password: 'password123'
+      })
+    })
+
+    it('does not emit submit event when form data is invalid', async () => {
+      const onSubmit = vi.fn()
+      const { user } = renderComponent({ onSubmit })
+
+      await user.type(getEmailInput(), 'invalid-email')
+      await user.type(getPasswordInput(), 'password123')
+      await user.click(screen.getByRole('button', { name: loginButtonText }))
+
+      expect(onSubmit).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Loading State', () => {
+    it('shows spinner when loading', () => {
+      useAuthStore().loading = true
+      renderComponent()
+
+      expect(
+        screen.getByRole('progressbar', { name: 'Loading' })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: loginButtonText })
+      ).not.toBeInTheDocument()
+    })
+
+    it('shows button when not loading', () => {
+      renderComponent()
+
+      expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: loginButtonText })
+      ).toBeInTheDocument()
+    })
+  })
+
+  describe('Component Structure', () => {
+    it('renders email input with correct attributes', () => {
+      renderComponent()
+
+      const emailInput = getEmailInput()
+      expect(emailInput).toHaveAttribute('id', 'comfy-org-sign-in-email')
+      expect(emailInput).toHaveAttribute('autocomplete', 'email')
+      expect(emailInput).toHaveAttribute('name', 'email')
+      expect(emailInput).toHaveAttribute('type', 'text')
+    })
+
+    it('renders password input with correct attributes', () => {
+      renderComponent()
+
+      const passwordInput = getPasswordInput()
+      expect(passwordInput).toHaveAttribute('id', 'comfy-org-sign-in-password')
+      expect(passwordInput).toHaveAttribute('name', 'password')
+    })
+  })
+
+  describe('Forgot Password with valid email', () => {
+    it('calls sendPasswordReset when email is valid', async () => {
+      const { user } = renderComponent()
+
+      await user.type(getEmailInput(), 'test@example.com')
+      await user.click(screen.getByText(forgotPasswordText))
+
+      expect(useAuthActions().sendPasswordReset).toHaveBeenCalledWith(
+        'test@example.com'
+      )
+      expect(mockToastAdd).not.toHaveBeenCalled()
+    })
+  })
+})

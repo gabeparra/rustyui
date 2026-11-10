@@ -1,0 +1,44 @@
+name: Bug report
+description: Something renders wrong, crashes, or does not match ComfyUI
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Please fill in as much as you can; a graph that reproduces the problem helps most.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: graph
+    attributes:
+      label: Graph
+      description: The ComfyUI API graph (or workflow) that shows the problem. Remove anything private from prompts.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Backend output
+      description: The `[rustyui]` and `[engine]` lines around the problem (`journalctl --user -u rustyui-backend` under systemd).
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: rustyui version or commit
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU, driver and CUDA version
+      placeholder: RTX 4070, driver 570.x, CUDA 12.8
+    validations:
+      required: true
+  - type: textarea
+    id: comfy
+    attributes:
+      label: Comparison with ComfyUI
+      description: If the output differs from ComfyUI's, the ComfyUI version and the output of `rustyui-backend compare ours.png comfy.png`.

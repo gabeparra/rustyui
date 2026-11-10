@@ -24,7 +24,7 @@ use std::time::Instant;
 /// says more about the shape of an answer than a list of categories, which a 12B model echoes back
 /// when it is told them in the abstract.
 const INSTRUCTIONS: &str = "\
-You write prompts for an SDXL image model that is prompted with short tags. Turn the request into one \
+You write prompts for an SDXL image model trained on comma-separated descriptive tags. Turn the request into one \
 line of 25 to 40 comma-separated tags, most important first: the quality tags, then the subject \
 (who or what, how many, colours, build), then what is happening (pose, action, expression, \
 clothing), then where and how (setting, props, light, framing).
@@ -34,7 +34,7 @@ keep its quality tags, its style tags and trigger words (which may look like nam
 subject, and rewrite the rest to fit the request.
 
 Example request: an old fisherman mending nets on a pier at dawn
-Example answer: masterpiece, best quality, highly detailed, solo, old man, grey beard, \
+Example answer: masterpiece, best quality, highly detailed, one man, solo, old man, grey beard, \
 wrinkled skin, knit cap, wool sweater, sitting, mending net, fishing net, focused, wooden pier, \
 boats, harbor, ocean, dawn, mist, soft lighting, outdoors, full body, from side
 
@@ -99,6 +99,11 @@ impl Writer {
         Ok(w)
     }
 
+    /// A token with no letter or digit in it: a comma, a space, a full stop.
+    fn is_separator(&self, id: u32) -> bool {
+        self.sp.decode_piece_ids(&[id]).is_ok_and(|t| !t.chars().any(char::is_alphanumeric))
+    }
+
     fn text(&self, s: &str) -> Result<Vec<u32>> {
         Ok(self.sp.encode(s).context("SentencePiece encode")?.into_iter().map(|p| p.id).collect())
     }
@@ -126,16 +131,24 @@ impl Writer {
         let mut logits = self.model.forward(&Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?, 0)?.squeeze(0)?;
         let mut pos = ids.len();
         let mut out: Vec<u32> = vec![];
+        let mut commas = 0;
         for _ in 0..MAX_TOKENS {
             // llama.cpp's repeat penalty over what was just written: a tag list otherwise falls
-            // into a loop of the same few words until the token budget runs out
-            let recent = &out[out.len().saturating_sub(REPEAT_WINDOW)..];
-            let scored = if recent.is_empty() { logits.clone() } else { apply_repeat_penalty(&logits, REPEAT_PENALTY, recent)? };
+            // into a loop of the same few words until the token budget runs out. The commas
+            // between tags are left out of it: a list repeats them by design, and penalising
+            // them made the model end its answer after about a dozen tags
+            let recent: Vec<u32> =
+                out[out.len().saturating_sub(REPEAT_WINDOW)..].iter().copied().filter(|&id| !self.is_separator(id)).collect();
+            let scored = if recent.is_empty() { logits.clone() } else { apply_repeat_penalty(&logits, REPEAT_PENALTY, &recent)? };
             let next = sampler.sample(&scored)?;
             if next == self.end_turn || next == self.eos {
                 break;
             }
             out.push(next);
+            commas += self.sp.decode_piece_ids(&[next]).map_or(0, |t| t.matches(',').count());
+            if commas >= MAX_TAGS {
+                break;
+            }
             // the answer is one line: a line break after some tags ends it
             if self.sp.decode_piece_ids(&[next]).is_ok_and(|t| t.contains('\n')) && out.len() > 8 {
                 break;
@@ -149,6 +162,8 @@ impl Writer {
 }
 
 const MAX_TOKENS: usize = 160;
+/// The instructions ask for 25 to 40 tags; a list that reaches 40 is cut there.
+const MAX_TAGS: usize = 40;
 const REPEAT_PENALTY: f32 = 1.15;
 const REPEAT_WINDOW: usize = 64;
 

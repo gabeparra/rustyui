@@ -108,10 +108,13 @@ a time.
 <tr>
 <td><a href="docs/examples/lighthouse.png"><code>lighthouse.png</code></a>: an SDXL checkpoint
 (Juggernaut XL v9), 1216x832, dpmpp_2m karras, 30 steps. The PNG holds its graph: drop it on
-either editor, or on ComfyUI.</td>
+either editor, or on ComfyUI. It is rustyui's render on an RTX 4090; ComfyUI 0.39.0 (default
+flags) rendered the same graph with the same checkpoint file to identical pixels, all 1,011,712
+of them.</td>
 <td><a href="docs/examples/lighthouse-hires.json"><code>lighthouse-hires.json</code></a>: the same
 with a hires fix (Remacri x4, lanczos down to 1824x1248, a second pass at denoise 0.4), as an API
-graph.</td>
+graph. The picture is rustyui's render at half size (912x624); at 1824x1248 it too was identical
+to ComfyUI's, all 6,829,056 values.</td>
 </tr>
 </table>
 
@@ -466,7 +469,9 @@ diffusers' names), and with euler_ancestral or euler on the normal schedule.
 ComfyUI as its server runs: torch 2.11 for CUDA 13.0, cuDNN 9.19, DynamicVRAM model patching and
 comfy_kitchen's CUDA kernels. Some results depend on the hardware, as they do in PyTorch (the CUDA
 noise layout on the GPU's SM count, cuDNN's engine choice on the GPU, x264's slicing on the CPU
-count), so exactness holds against ComfyUI on the same machine.
+count), so exactness holds against ComfyUI on the same machine. The example pictures above were
+checked on an RTX 4090 against ComfyUI 0.39.0 (torch 2.11.0+cu130, cuDNN 9.19, comfy_kitchen
+0.2.37, comfy-aimdo 0.5.6) started with default flags, so DynamicVRAM was on.
 
 | Piece | How rustyui runs it |
 |---|---|

@@ -528,43 +528,45 @@ with guides is next.
 
 ## Performance
 
-These are timings from the machines named, with ComfyUI set up as described under
-[How it matches ComfyUI](#how-it-matches-comfyui); other hardware and versions will differ. The
-same 1024x1792, 30-step, two-LoRA SDXL graph on an RTX 4070 Ti SUPER:
+Measured on 2026-11-11 on an RTX 4090 (24 GB), rustyui at commit 01ec968 against ComfyUI 0.39.0 with
+default flags, the same graph, seed and files in both, and the same output from both (every SDXL image
+identical, every video frame identical). Each figure is the median of three runs; "from process start"
+means starting the engine and waiting for the finished file. Other hardware and versions will differ.
 
-| | sampling | whole render |
-|---|---|---|
-| ComfyUI | 12.1 s (0.40 s/step) | 41.6 s |
-| rustyui | 12.8 s (0.43 s/step) | 15.0 s |
+| SDXL graph | | ComfyUI | rustyui |
+|---|---|---|---|
+| [`lighthouse.png`](docs/examples/lighthouse.png), 1216x832, 30 steps | from process start | 10.6 s | 12.5 s |
+| | warm, new seed | 3.8 s | 4.3 s |
+| | the 30 steps | 3.38 s | 3.59 s |
+| two LoRAs, 1024x1792, 30 steps | from process start | 14.4 s | 16.1 s |
+| | warm, new seed | 6.9 s | 7.8 s |
+| | the 30 steps | 6.30 s | 6.62 s |
+| [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 18.0 s | 21.7 s |
+| | warm, new seed | 10.8 s | 13.1 s |
 
-LTX-2.3 image to video, 640x448, 17 frames, 8 steps, on an RTX 4090, with results identical to
-ComfyUI's:
+So today rustyui is slower than ComfyUI on a 4090: about 5 to 6 percent in the sampling steps and
+12 to 22 percent for a whole graph. The rest of the gap is a one-time start-up of about 5 s inside
+the first job, about half a second per job loading the UNet and LoRAs, and a slower VAE decode and
+ESRGAN upscale. Where it is ahead: the server answers in 0.2 s against about 5 s, and it uses 4 to
+5 GB less GPU memory on every graph above.
 
-| | rustyui |
-|---|---|
-| the 8 steps | 1.45 s (ComfyUI: 4.0 s with its model already loaded) |
-| the whole graph, cold | 10.8 s |
-| the same graph again | 0.3 s (nothing changed, nothing runs, as in ComfyUI) |
-| a new seed | 5.3 s |
-| a new prompt | 7.6 s |
+LTX-2.3 is slower still with the published 42 GB bf16 DiT listed under
+[Supported models](#supported-models): it does not fit on a 24 GB card, so rustyui keeps 23 of its
+48 blocks on the card and streams the rest every step. On the [video example](#examples) (640x448,
+153 frames, 8 steps) a single run took 65.7 s from process start against ComfyUI's 42.1 s, and the
+8 steps 27.6 s against 10.5 s.
 
-The three-pass workflow above at 1280x832 (49 frames through all passes, 97 frames at 60 fps out)
-takes 63 s from a cold start on an RTX 4090, 25 s of that folding the LoRAs and uploading 20 GB of
-DiT blocks; ComfyUI takes 40 s with its models already loaded. The next graph with the same LoRAs
-folds nothing.
+An earlier measurement on an RTX 4070 Ti SUPER had the two-LoRA graph at 15.0 s for rustyui against
+41.6 s for ComfyUI, and earlier LTX timings were taken with a DiT file that fits on the card whole.
+Neither has been repeated with the setup above, so they are left out.
 
-With the 42 GB bf16 DiT listed under [Supported models](#supported-models) these take longer, since
-it does not fit on a 24 GB card whole: the [video example](#examples) (640x448, 153 frames,
-8 steps) takes 46 s, 27 s of it in the steps.
-
-The speed comes from running the kernels PyTorch runs, which also keeps the rounding identical:
+rustyui runs the kernels PyTorch runs, which is what keeps the rounding identical:
 FlashAttention-2 (trimmed, built with torch's flags and split-KV heuristic), cuDNN convolutions
 planned as torch plans them, cuBLASLt linears with the bias in the epilogue, and fused
 group-norm/SiLU, layer-norm and GEGLU kernels written to PyTorch's arithmetic
-(`backend/kernels/ops.cu`). At these sizes much of a PyTorch step is likely the overhead around its
-many small operations, which rustyui does not have. It also keeps a node's outputs while nothing
-upstream changes, keeps the DiT and the text context loaded between graphs until another model
-needs the room, and uploads weights through page-locked memory.
+(`backend/kernels/ops.cu`). It also keeps a node's outputs while nothing upstream changes, keeps the
+DiT and the text context loaded between graphs until another model needs the room, and uploads
+weights through page-locked memory.
 
 ## Network access
 

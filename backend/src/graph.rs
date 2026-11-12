@@ -202,12 +202,16 @@ pub struct Engine {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Keep {
     Nothing,
+    Anima,
     Esrgan,
     VaeEnc,
     VaeDec,
     Clip,
     Unet,
 }
+
+/// the order Engine::make_room lets models go in
+const EVICT_ORDER: [Keep; 6] = [Keep::Anima, Keep::Esrgan, Keep::VaeEnc, Keep::VaeDec, Keep::Clip, Keep::Unet];
 
 /// VRAM to load both SDXL text encoders (1.6 GB in f16) and encode a prompt
 const CLIP_NEED: usize = 3 << 30;
@@ -332,36 +336,37 @@ impl Engine {
         }
     }
 
-    /// Lets the SDXL models on the card go, the quickest to load again first, until `need` bytes
-    /// are free, keeping `keep`. The video and Anima models always go (they need most of the card).
-    /// With RUSTYUI_ONE_MODEL every other model goes, as before.
+    /// Lets the image models on the card go until `need` bytes are free, keeping `keep`: the Anima
+    /// DiT first (another family's), then the SDXL models, the quickest to load again first. The
+    /// video models always go (they need most of the card). With RUSTYUI_ONE_MODEL every other
+    /// model goes, as before.
     fn make_room(&mut self, need: usize, keep: Keep) -> Result<()> {
         self.ltx_te = None;
         self.ltx_dit = None;
-        let order = [Keep::Esrgan, Keep::VaeEnc, Keep::VaeDec, Keep::Clip, Keep::Unet];
         let mut dropped = false;
-        for k in order {
-            if k == keep {
+        for k in EVICT_ORDER {
+            if k == keep || !self.holds(k) {
                 continue;
             }
             if !self.one_model {
-                if dropped {
-                    self.dev.synchronize()?;
-                    dropped = false;
-                }
+                // what was freed (here or by the node before) goes back from the stream's memory
+                // pool at a synchronize, and only then does cudaMemGetInfo count it as free
+                self.dev.synchronize()?;
+                dropped = false;
                 if self.free_vram()? >= need {
                     break;
                 }
             }
-            let had = match k {
-                Keep::Esrgan => self.esrgan.take().is_some(),
-                Keep::VaeEnc => self.vae_enc.take().is_some(),
-                Keep::VaeDec => self.vae_dec.take().is_some(),
-                Keep::Clip => self.clip.take().is_some(),
-                Keep::Unet => self.unet.take().is_some(),
-                Keep::Nothing => false,
-            };
-            dropped |= had;
+            match k {
+                Keep::Anima => self.anima = None,
+                Keep::Esrgan => self.esrgan = None,
+                Keep::VaeEnc => self.vae_enc = None,
+                Keep::VaeDec => self.vae_dec = None,
+                Keep::Clip => self.clip = None,
+                Keep::Unet => self.unet = None,
+                Keep::Nothing => {}
+            }
+            dropped = true;
         }
         if dropped {
             self.dev.synchronize()?;
@@ -369,12 +374,23 @@ impl Engine {
         Ok(())
     }
 
-    /// Every SDXL model but `keep` off the card, after an attempt ran out of memory beside them;
+    /// whether that model is on the card
+    fn holds(&self, k: Keep) -> bool {
+        match k {
+            Keep::Anima => self.anima.is_some(),
+            Keep::Esrgan => self.esrgan.is_some(),
+            Keep::VaeEnc => self.vae_enc.is_some(),
+            Keep::VaeDec => self.vae_dec.is_some(),
+            Keep::Clip => self.clip.is_some(),
+            Keep::Unet => self.unet.is_some(),
+            Keep::Nothing => false,
+        }
+    }
+
+    /// Every image model but `keep` off the card, after an attempt ran out of memory beside them;
     /// false when there was nothing to let go (the error stands)
     fn room_after_oom(&mut self, keep: Keep) -> Result<bool> {
-        let before = [self.esrgan.is_some(), self.vae_enc.is_some(), self.vae_dec.is_some(), self.clip.is_some(), self.unet.is_some()];
-        let had = before.iter().zip([Keep::Esrgan, Keep::VaeEnc, Keep::VaeDec, Keep::Clip, Keep::Unet]).any(|(h, k)| *h && k != keep);
-        if !had {
+        if !EVICT_ORDER.into_iter().any(|k| k != keep && self.holds(k)) {
             return Ok(false);
         }
         self.make_room(usize::MAX, keep)?;
@@ -747,6 +763,9 @@ impl Engine {
                 let t = Instant::now();
                 // ImageUpscaleWithModel's own estimate: the model and 384 times a 512-pixel tile's
                 // f32 input times the scale
+                if self.esrgan.as_ref().is_some_and(|(p, _)| p != &path) {
+                    self.esrgan = None;
+                }
                 self.make_room(UPSCALE_NEED, Keep::Esrgan)?;
                 let model = match &self.esrgan {
                     Some((p, m)) if p == &path => m.clone(),
@@ -1172,6 +1191,9 @@ impl Engine {
         let img = img.narrow(2, (h % 8) / 2, ch)?.narrow(3, (w % 8) / 2, cw)?.contiguous()?;
         // VAE.memory_used_encode: 1767 bytes a pixel for the SDXL VAE in bf16, ComfyUI's estimate
         let (b, _, _, _) = img.dims4()?;
+        if self.vae_enc.as_ref().is_some_and(|(p, _)| p != path) {
+            self.vae_enc = None;
+        }
         self.make_room(1767 * 2 * b * ch * cw, Keep::VaeEnc)?;
         let enc = match &self.vae_enc {
             Some((p, e)) if p == path => e.clone(),
@@ -1209,6 +1231,9 @@ impl Engine {
         let t = Instant::now();
         // VAE.memory_used_decode: 2178 * 64 bytes a latent pixel for the SDXL VAE in bf16
         let (b, _, h, w) = z.dims4()?;
+        if self.vae_dec.as_ref().is_some_and(|(p, _)| p != path) {
+            self.vae_dec = None;
+        }
         self.make_room(2178 * 64 * 2 * b * h * w, Keep::VaeDec)?;
         let dec = match &self.vae_dec {
             Some((p, d)) if p == path => d.clone(),

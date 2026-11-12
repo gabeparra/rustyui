@@ -20,7 +20,141 @@ pub enum Linear {
 
 fn raw_u8(st: &MmapedSafetensors, name: &str, dev: &Device) -> Result<Tensor> {
     let view = st.get(name).with_context(|| format!("ltx: no {name}"))?;
-    Ok(kernels::upload(view.data(), DType::U8, view.shape(), dev)?)
+    Ok(kernels::upload(host_bytes(name).unwrap_or(view.data()), DType::U8, view.shape(), dev)?)
+}
+
+/// Page-locked host copies of the streamed blocks' tensors of one DiT, by name. A streamed block
+/// uploads from here by DMA on its own stream while the block before it runs, where the mapped
+/// file needed a CPU copy through the staging buffer for each step. Kept between graphs (at
+/// these sizes the DiT leaves the card for every video decode), let go when the engine ends
+/// (`drop_host_blocks`) or for another DiT.
+pub struct HostBlocks {
+    key: String,
+    blocks: Vec<usize>,
+    buf: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u8>,
+    base: usize,
+    /// offset, length and, for a tensor kept in another dtype than the file's, that dtype
+    /// (U8: as in the file)
+    at: std::collections::HashMap<String, (usize, usize, DType)>,
+}
+
+impl Drop for HostBlocks {
+    fn drop(&mut self) {
+        kernels::unmark_pinned(self.base, self.base + self.buf.len());
+    }
+}
+
+thread_local! {
+    static HOST_BLOCKS: std::cell::RefCell<Option<HostBlocks>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The host copy of tensor `name` and the dtype it is kept in when that is not the file's, when it
+/// has one (the slice lives until `drop_host_blocks` or another DiT's copy replaces it; both
+/// happen between graphs, never during a block's upload)
+fn host_copy(name: &str) -> Option<(&'static [u8], Option<DType>)> {
+    HOST_BLOCKS.with(|h| {
+        let h = h.borrow();
+        let hb = h.as_ref()?;
+        let &(off, len, dt) = hb.at.get(name)?;
+        Some((unsafe { std::slice::from_raw_parts((hb.base + off) as *const u8, len) }, (dt != DType::U8).then_some(dt)))
+    })
+}
+
+fn host_bytes(name: &str) -> Option<&'static [u8]> {
+    host_copy(name).map(|h| h.0)
+}
+
+/// Lets the streamed blocks' host copy go (when the engine ends)
+pub fn drop_host_blocks() {
+    HOST_BLOCKS.with(|h| h.borrow_mut().take());
+}
+
+/// RAM the kernel can still give, in bytes
+fn mem_available() -> usize {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<usize>().ok()))
+        .map_or(0, |kb| kb * 1024)
+}
+
+/// Makes the host copy of blocks `list` of the DiT `key` unless it is there: only with 16 GB of
+/// RAM to spare beside it (RUSTYUI_NO_PIN=1 never)
+fn ensure_host_blocks(key: &str, st: &MmapedSafetensors, list: &[usize], dev: &Device) -> Result<()> {
+    if HOST_BLOCKS.with(|h| h.borrow().as_ref().is_some_and(|hb| hb.key == key && list.iter().all(|k| hb.blocks.contains(k)))) {
+        return Ok(());
+    }
+    drop_host_blocks();
+    if std::env::var_os("RUSTYUI_NO_PIN").is_some() || list.is_empty() {
+        return Ok(());
+    }
+    let t = std::time::Instant::now();
+    let mut names = vec![];
+    for &k in list {
+        let prefix = format!("{DIT}transformer_blocks.{k}.");
+        for (n, v) in st.tensors() {
+            // nothing may read or free a block's uploads before the main stream waits for them
+            // (when the block is used), so an fp8 layer's scale (cast as it loads) keeps the
+            // ordered upload, and the scale-shift tables are kept already cast to bf16
+            if !n.starts_with(&prefix) || n.ends_with("weight_scale") {
+                continue;
+            }
+            let f32_table = n.contains("scale_shift_table") && format!("{:?}", v.dtype()) == "F32";
+            names.push((n, if f32_table { v.data().len() / 2 } else { v.data().len() }, f32_table));
+        }
+    }
+    let total: usize = names.iter().map(|n| n.1).sum();
+    let tables = names.iter().filter(|n| n.2).count();
+    if mem_available() < total + (16usize << 30) {
+        eprintln!(
+            "[ltx] not enough RAM to keep the {} streamed blocks page-locked ({:.1} GB): they stream through the staging buffer",
+            list.len(),
+            total as f64 / 1e9
+        );
+        return Ok(());
+    }
+    let Device::Cuda(d) = dev else { return Ok(()) };
+    let mut buf =
+        unsafe { d.cuda_stream().context().alloc_pinned::<u8>(total) }.map_err(|e| anyhow::anyhow!("pinned host memory: {e:?}"))?;
+    let host = buf.as_mut_slice().map_err(|e| anyhow::anyhow!("pinned host memory: {e:?}"))?;
+    let base = host.as_ptr() as usize;
+    let mut at = std::collections::HashMap::new();
+    let mut jobs: Vec<(&[u8], &mut [u8], bool)> = vec![];
+    let mut rest = host;
+    let mut off = 0;
+    for (n, len, table) in &names {
+        let (dst, tail) = rest.split_at_mut(*len);
+        rest = tail;
+        jobs.push((st.get(n)?.data(), dst, *table));
+        at.insert(n.clone(), (off, *len, if *table { DType::BF16 } else { DType::U8 }));
+        off += len;
+    }
+    // eight threads take the mapped file's page faults side by side
+    let per = jobs.len().div_ceil(8).max(1);
+    std::thread::scope(|sc| {
+        for chunk in jobs.chunks_mut(per) {
+            sc.spawn(move || {
+                for (src, dst, table) in chunk.iter_mut() {
+                    if *table {
+                        // f32 to bf16 rounding to nearest even, as the card's cast does
+                        for (d, s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                            *d = half::bf16::from_f32(f32::from_le_bytes(*s)).to_le_bytes();
+                        }
+                    } else {
+                        dst.copy_from_slice(src);
+                    }
+                }
+            });
+        }
+    });
+    kernels::mark_pinned(base, base + total);
+    HOST_BLOCKS.with(|h| *h.borrow_mut() = Some(HostBlocks { key: key.to_string(), blocks: list.to_vec(), buf, base, at }));
+    eprintln!(
+        "[ltx] {} streamed blocks copied to page-locked RAM ({:.1} GB, {tables} scale-shift tables as bf16) in {:.1}s",
+        list.len(),
+        total as f64 / 1e9,
+        t.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 /// A checkpoint tensor onto the card in its own dtype, through the pinned uploader (the same
@@ -34,6 +168,9 @@ fn fetch(st: &MmapedSafetensors, name: &str, dev: &Device) -> Result<Tensor> {
         "U8" => DType::U8,
         _ => return Ok(st.load(name, dev)?),
     };
+    if let Some((bytes, dt)) = host_copy(name) {
+        return Ok(kernels::upload(bytes, dt.unwrap_or(dtype), view.shape(), dev)?);
+    }
     Ok(kernels::upload(view.data(), dtype, view.shape(), dev)?)
 }
 
@@ -1086,6 +1223,17 @@ pub struct BlockCache {
     loras: Option<std::rc::Rc<Loras>>,
     /// whether every block's LoRAs are folded and kept (`fold_all`)
     all_folded: bool,
+    /// one block's bytes in the checkpoint (0 until `preload` has looked)
+    block_bytes: usize,
+    /// after `preload` left blocks to stream: which
+    streamed: Option<Vec<usize>>,
+    /// the DiT's checkpoint (DitCache's key) when its streamed blocks may keep a host copy
+    key: Option<String>,
+    /// the next streamed block, its upload queued while the block before it runs
+    next: Option<(usize, std::rc::Rc<Block>)>,
+    /// set by `preload` when blocks are left to stream: no other block becomes resident until the
+    /// next `preload`
+    settled: bool,
 }
 
 /// Free VRAM after a synchronize: memory freed on the stream stays in CUDA's pool, counted as used,
@@ -1098,9 +1246,32 @@ fn free_vram(dev: &Device) -> Result<usize> {
     }
 }
 
+impl Drop for BlockCache {
+    /// a prefetched block's upload finishes before its memory can go back to the pool
+    fn drop(&mut self) {
+        let _ = kernels::wait_uploads();
+    }
+}
+
 impl BlockCache {
     pub fn new(reserve: usize) -> Self {
-        Self { resident: vec![], reserve, loras: None, all_folded: false }
+        Self {
+            resident: vec![],
+            reserve,
+            loras: None,
+            all_folded: false,
+            block_bytes: 0,
+            streamed: None,
+            key: None,
+            next: None,
+            settled: false,
+        }
+    }
+
+    /// The same cache keeping a page-locked host copy of the blocks it streams, for the DiT `key`
+    pub fn with_host_copy(mut self, key: String) -> Self {
+        self.key = Some(key);
+        self
     }
 
     /// The same cache with LoRAs folded into each block as it loads
@@ -1120,8 +1291,17 @@ impl BlockCache {
     /// What loading one block that is not resident takes on top of the activations: the block
     /// (about 0.39 GiB), and with LoRAs not folded yet the room to fold them in (an fp16 copy and
     /// an f32 product of its largest layer, about 0.8 GiB at the peak)
+    /// Streamed blocks load one ahead (`prefetch`), so two are on the card at once: about 0.85 GiB
+    /// each for the published bf16 file.
     fn streaming_need(&self) -> usize {
-        (1usize << 29) + if self.loras.is_some() && !self.all_folded { 1usize << 30 } else { 0 }
+        let blocks = if self.block_bytes > 0 { 2 * self.block_bytes } else { 1usize << 29 };
+        blocks + if self.loras.is_some() && !self.all_folded { 1usize << 30 } else { 0 }
+    }
+
+    /// Every tensor of block `i` as (pointer, length) in the mapped checkpoint
+    fn block_parts(st: &MmapedSafetensors, i: usize) -> Vec<(usize, usize)> {
+        let prefix = format!("{DIT}transformer_blocks.{i}.");
+        st.tensors().iter().filter(|(n, _)| n.starts_with(&prefix)).map(|(_, v)| (v.data().as_ptr() as usize, v.data().len())).collect()
     }
 
     /// With LoRAs, folds every block once, a block at a time, keeping each in host memory and
@@ -1166,6 +1346,8 @@ impl BlockCache {
     }
 
     fn evict_to(&mut self, free_wanted: usize, dev: &Device) -> Result<()> {
+        kernels::wait_uploads()?;
+        self.next = None;
         while free_vram(dev)? < free_wanted {
             match self.resident.iter().rposition(|b| b.is_some()) {
                 Some(i) => {
@@ -1182,6 +1364,12 @@ impl BlockCache {
     /// first step too), so the steps run with the weights already on the card. Returns how many
     /// are resident.
     pub fn preload(&mut self, st: &MmapedSafetensors, dev: &Device) -> Result<usize> {
+        kernels::wait_uploads()?;
+        self.next = None;
+        self.settled = false;
+        if self.block_bytes == 0 {
+            self.block_bytes = Self::block_parts(st, 0).iter().map(|p| p.1).sum();
+        }
         self.fold_all(st, dev)?;
         let mut i = 0;
         let mut all = true;
@@ -1199,21 +1387,67 @@ impl BlockCache {
                 break;
             }
             self.get(st, i, dev)?;
+            // a block that did not stay (the room went below the reserve as it loaded) ends the
+            // preload: loading the rest only to let them go again took about 2 s a graph
+            if self.resident.get(i).is_none_or(|b| b.is_none()) {
+                all = false;
+                break;
+            }
             i += 1;
         }
-        // blocks left over load during every step: keep room for one beside the activations
+        // blocks left over load during every step: keep room for them beside the activations
         if !all {
             self.evict_to(self.reserve + self.streaming_need(), dev)?;
+            let n = i.max(self.resident.len());
+            let mut count = n;
+            while st.get(&format!("{DIT}transformer_blocks.{count}.scale_shift_table")).is_ok() {
+                count += 1;
+            }
+            let list: Vec<usize> = (0..count).filter(|&k| self.resident.get(k).is_none_or(|b| b.is_none())).collect();
+            // a page-locked host copy of them, so each step's uploads are DMA (folded LoRA layers
+            // upload from their own host copies, through the staging buffer)
+            if let (Some(key), None) = (&self.key, &self.loras) {
+                ensure_host_blocks(key, st, &list, dev)?;
+            }
+            self.streamed = Some(list);
+            self.settled = true;
+        } else {
+            self.streamed = None;
         }
         Ok(self.resident())
+    }
+
+    /// Queues the upload of the streamed block that runs after block `i` (wrapping round to the
+    /// first streamed block for the next call), so it overlaps block `i`'s kernels
+    fn prefetch(&mut self, st: &MmapedSafetensors, i: usize, dev: &Device) -> Result<()> {
+        let Some(list) = &self.streamed else { return Ok(()) };
+        if !self.settled || self.next.is_some() || list.is_empty() {
+            return Ok(());
+        }
+        let k = list.iter().copied().find(|&k| k > i).unwrap_or(list[0]);
+        if self.resident.get(k).is_some_and(|b| b.is_some()) {
+            return Ok(());
+        }
+        let b = std::rc::Rc::new(Block::load_lora(st, k, dev, self.loras.as_deref())?);
+        self.next = Some((k, b));
+        Ok(())
     }
 
     fn get(&mut self, st: &MmapedSafetensors, i: usize, dev: &Device) -> Result<std::rc::Rc<Block>> {
         if let Some(Some(b)) = self.resident.get(i) {
             return Ok(b.clone());
         }
+        if self.next.as_ref().is_some_and(|(k, _)| *k == i) {
+            kernels::wait_uploads()?;
+            return Ok(self.next.take().unwrap().1);
+        }
+        kernels::wait_uploads()?;
+        self.next = None;
         let b = std::rc::Rc::new(Block::load_lora(st, i, dev, self.loras.as_deref())?);
-        if free_vram(dev)? > self.reserve + self.streaming_need() {
+        kernels::wait_uploads()?;
+        // once `preload` has settled which blocks stream, they never stay (and no sync is needed
+        // to look at the free memory)
+        if !self.settled && free_vram(dev)? > self.reserve + self.streaming_need() {
             if self.resident.len() <= i {
                 self.resident.resize(i + 1, None);
             }
@@ -1275,6 +1509,7 @@ impl Dit {
         let mut i = 0;
         while st.get(&format!("{DIT}transformer_blocks.{i}.scale_shift_table")).is_ok() {
             let blk = cache.get(st, i, &dev)?;
+            cache.prefetch(st, i, &dev)?;
             let (v2, a2) = blk.forward(&vx, &ax, &args)?;
             (vx, ax) = (v2, a2);
             each_block(i, &vx, &ax)?;

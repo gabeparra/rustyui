@@ -2064,6 +2064,8 @@ impl Drop for Engine {
         self.dump = None;
         let dropped = t.elapsed().as_secs_f64();
         let synced = self.dev.synchronize();
+        // the LTX DiT's page-locked host copy goes with the engine (the server's idle release and /free)
+        crate::ltx::drop_host_blocks();
         eprintln!(
             "[engine] models off the card: dropped in {:.1} ms, synchronized {:.1} ms later{}",
             dropped * 1e3,

@@ -115,9 +115,11 @@ impl LtxCond {
 pub(super) struct DitCache {
     /// the checkpoint and the LoRAs folded into its blocks, with their strengths
     key: String,
+    /// before `st`: fields drop in order, and the blocks' page-locked pages are let go before the
+    /// file is unmapped
+    blocks: ltx::BlockCache,
     st: MmapedSafetensors,
     dit: ltx::Dit,
-    blocks: ltx::BlockCache,
 }
 
 /// A CUDA allocation that failed for want of memory
@@ -717,7 +719,7 @@ impl Engine {
                 }
                 Some(Rc::new(l))
             };
-            let blocks = ltx::BlockCache::for_tokens(tokens).with_loras(loras);
+            let blocks = ltx::BlockCache::for_tokens(tokens).with_loras(loras).with_host_copy(key.clone());
             self.ltx_dit = Some(DitCache { key, st, dit, blocks });
             dev.synchronize()?;
             self.timings.push(("load the DiT's weights outside its blocks".into(), t0.elapsed().as_secs_f64()));

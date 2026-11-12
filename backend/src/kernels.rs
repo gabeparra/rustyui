@@ -1333,6 +1333,7 @@ pub fn torch_linear_channels_first(x_cf: &Tensor, w: &Tensor, b: &Tensor) -> Res
 
 // ── checkpoint bytes onto the card through page-locked memory ──────────────────
 
+use candle_core::cuda_backend::cudarc::driver::sys as cusys;
 use candle_core::cuda_backend::cudarc::driver::{result as drv, CudaEvent, DevicePtrMut, DeviceRepr, PinnedHostSlice};
 
 /// A page-locked staging buffer in two halves, and for each half the event its last upload
@@ -1365,7 +1366,15 @@ pub enum UploadSrc<'a> {
     File { file: &'a std::fs::File, offset: u64, len: usize },
 }
 
-impl UploadSrc<'_> {
+impl<'a> UploadSrc<'a> {
+    /// the bytes, when they are memory that `mark_pinned` marked as page-locked
+    fn pinned(&self) -> Option<&'a [u8]> {
+        match self {
+            UploadSrc::Bytes(b) if is_pinned(b) => Some(b),
+            _ => None,
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             UploadSrc::Bytes(b) => b.len(),
@@ -1430,6 +1439,27 @@ fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(src: UploadSr
     }
     let stream = d.cuda_stream();
     let mut dst = unsafe { stream.alloc::<T>(n_elem) }.w()?;
+    if let Some(bytes) = src.pinned() {
+        // page-locked already: one DMA on the copy stream, after the allocation; the main stream
+        // waits for it only at `wait_uploads` (a block's upload overlaps the kernels queued
+        // before that)
+        let (base, _guard) = dst.device_ptr_mut(&stream);
+        let copy = copy_stream()?;
+        unsafe {
+            let flags = cusys::CUevent_flags::CU_EVENT_DISABLE_TIMING;
+            let ready = drv::event::create(flags).w()?;
+            drv::event::record(ready, stream.cu_stream()).w()?;
+            drv::stream::wait_event(copy, ready, cusys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT).w()?;
+            drv::event::destroy(ready).w()?;
+            drv::memcpy_htod_async(base, bytes, copy).w()?;
+            let done = drv::event::create(flags).w()?;
+            drv::event::record(done, copy).w()?;
+            PENDING.with(|p| p.borrow_mut().push((done as usize, stream.cu_stream() as usize)));
+        }
+        drop(_guard);
+        let storage = candle_core::Storage::Cuda(CudaStorage::wrap_cuda_slice(dst, d.clone()));
+        return Ok(Tensor::from_storage(storage, shape, candle_core::op::BackpropOp::none(), false));
+    }
     STAGING.with(|cell| -> Result<()> {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
@@ -1461,6 +1491,57 @@ fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(src: UploadSr
     })?;
     let storage = candle_core::Storage::Cuda(CudaStorage::wrap_cuda_slice(dst, d.clone()));
     Ok(Tensor::from_storage(storage, shape, candle_core::op::BackpropOp::none(), false))
+}
+
+thread_local! {
+    /// host ranges (start, end) that are page-locked, for uploads (mark_pinned)
+    static PINNED: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(vec![]) };
+    /// the stream page-locked uploads run on, beside candle's (made once, never destroyed)
+    static COPY_STREAM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// uploads on the copy stream the main stream has not waited for yet: (event, main stream)
+    static PENDING: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(vec![]) };
+}
+
+/// Makes the main stream wait for every upload `upload` left on the copy stream: before anything
+/// reads those tensors or lets them go
+pub fn wait_uploads() -> Result<()> {
+    let pending: Vec<(usize, usize)> = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for (ev, main) in pending {
+        unsafe {
+            drv::stream::wait_event(main as cusys::CUstream, ev as cusys::CUevent, cusys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT).w()?;
+            drv::event::destroy(ev as cusys::CUevent).w()?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_stream() -> Result<cusys::CUstream> {
+    COPY_STREAM.with(|c| -> Result<cusys::CUstream> {
+        if c.get() == 0 {
+            let s = drv::stream::create(drv::stream::StreamKind::NonBlocking).w()?;
+            c.set(s as usize);
+        }
+        Ok(c.get() as cusys::CUstream)
+    })
+}
+
+fn is_pinned(bytes: &[u8]) -> bool {
+    let (a, b) = (bytes.as_ptr() as usize, bytes.as_ptr() as usize + bytes.len());
+    PINNED.with(|p| p.borrow().iter().any(|&(s, e)| s <= a && b <= e))
+}
+
+/// Marks `[start, end)` as page-locked host memory (a pinned allocation that stays put while it is
+/// marked): `upload` then copies from it by DMA on its own stream, overlapping the kernels before it
+pub fn mark_pinned(start: usize, end: usize) {
+    PINNED.with(|p| p.borrow_mut().push((start, end)));
+}
+
+/// Undoes `mark_pinned`, once the copy stream has finished reading the range
+pub fn unmark_pinned(start: usize, end: usize) {
+    if let Ok(s) = copy_stream() {
+        let _ = unsafe { drv::stream::synchronize(s) };
+    }
+    PINNED.with(|p| p.borrow_mut().retain(|r| *r != (start, end)));
 }
 
 /// torch.randn(n) for a CUDA generator at (seed, offset), launched as torch launches it: blocks of

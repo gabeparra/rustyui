@@ -2038,3 +2038,33 @@ impl Engine {
         self.unet = None;
     }
 }
+
+impl Drop for Engine {
+    /// The card first: every model and every tensor a node left behind, then a synchronize, at
+    /// which the stream's pool hands their memory back. Only then the files, unmapped on another
+    /// thread. Left to field order, `files` went first, and unmapping a checkpoint whose pages
+    /// a load has read takes a while (about 0.25 s for SDXL's 6.6 GiB on the 4090 box), all of
+    /// it before the first model left the card.
+    fn drop(&mut self) {
+        let t = Instant::now();
+        self.free();
+        self.anima = None;
+        self.memo.clear();
+        self.cache.clear();
+        self.ltx_context.clear();
+        self.dump = None;
+        let dropped = t.elapsed().as_secs_f64();
+        let synced = self.dev.synchronize();
+        eprintln!(
+            "[engine] models off the card: dropped in {:.1} ms, synchronized {:.1} ms later{}",
+            dropped * 1e3,
+            (t.elapsed().as_secs_f64() - dropped) * 1e3,
+            synced.err().map(|e| format!(" (synchronize: {e})")).unwrap_or_default()
+        );
+        let files: Vec<File> = self.files.drain().filter_map(|(_, f)| Rc::try_unwrap(f).ok()).collect();
+        if !files.is_empty() {
+            // (a file something else still holds, none should, stays with that owner)
+            let _ = std::thread::Builder::new().name("unmap".into()).spawn(move || drop(files));
+        }
+    }
+}

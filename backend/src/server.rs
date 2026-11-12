@@ -293,12 +293,14 @@ fn wake(srv: &Arc<Server>, s: &mut State) {
 /// The worker is marked down only after all that, and a prompt that came meanwhile starts the
 /// next session.
 fn worker(srv: Arc<Server>) {
-    let why = {
+    let (why, ending) = {
         let srv = srv.clone();
-        thread::spawn(move || run_jobs(&srv)).join().unwrap_or_else(|_| "a job panicked".to_string())
+        thread::spawn(move || run_jobs(&srv)).join().unwrap_or_else(|_| ("a job panicked".to_string(), Instant::now()))
     };
     candle_core::cuda_backend::clear_param_cache();
-    eprintln!("[rustyui] {why}: models released");
+    // from the worker's decision to stop to here: the engine's drop, then the job thread's end
+    // (its cuBLAS and cuDNN handles and workspaces) and candle's kernel parameters
+    eprintln!("[rustyui] {why}: models released, session ended in {:.1} ms", ending.elapsed().as_secs_f64() * 1e3);
     let mut s = srv.st.lock().unwrap();
     s.worker = false;
     // a prompt that came in while the context was going
@@ -310,8 +312,9 @@ enum Next {
     Write(WriteJob),
 }
 
-/// Runs the queue until `idle` seconds pass without work or a /free, and says which.
-fn run_jobs(srv: &Arc<Server>) -> String {
+/// Runs the queue until `idle` seconds pass without work or a /free, and says which and when it
+/// decided to stop.
+fn run_jobs(srv: &Arc<Server>) -> (String, Instant) {
     let mut engine: Option<Engine> = None;
     let mut writer: Option<crate::writer::Writer> = None;
     loop {
@@ -332,11 +335,12 @@ fn run_jobs(srv: &Arc<Server>) -> String {
                 }
                 let idle = s.last.elapsed() > Duration::from_secs(srv.idle);
                 if idle || s.free {
+                    let ending = Instant::now();
                     s.free = false;
                     drop(s);
                     drop(engine);
                     drop(writer);
-                    return if idle { format!("idle for {}s", srv.idle) } else { "asked to free".to_string() };
+                    return (if idle { format!("idle for {}s", srv.idle) } else { "asked to free".to_string() }, ending);
                 }
                 s = srv.cv.wait_timeout(s, Duration::from_secs(1)).unwrap().0;
             }

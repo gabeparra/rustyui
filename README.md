@@ -90,8 +90,8 @@ only while there is room for what runs next.
   comfyui_controlnet_aux, ComfyUI-RMBG, ComfyUI-Impact-Pack and ComfyUI-TiledAttentionCouple, in
   Rust, under their own names.
 - **Light on the machine.** Image models kept in VRAM only while there is room, weights read
-  straight from the file through page-locked memory, models unloaded after 90 s without work. Under systemd socket activation the
-  process starts on the first request and exits when idle.
+  straight from the file through page-locked memory, models unloaded after 90 s without work.
+  Under systemd socket activation the process starts on the first request and exits when idle.
 - **Loopback only.** Listens on `127.0.0.1` and refuses cross-site, DNS-rebinding and
   foreign-origin requests from browsers.
 - **Optional prompt writer.** Point `--writer` at any GGUF Gemma 3 instruct model and the backend
@@ -545,24 +545,29 @@ Other hardware and versions will differ.
 | [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 20.2 s | 14.0 s |
 | | warm, new seed | 13.6 s | 11.3 s |
 
-Letting the models go, measured on the same card on the same day against the same ComfyUI (median of
-three; rustyui at commit fa472d4 for the two-LoRA graph, 20ab388 for the other two, which load them
-the same way; every image identical to ComfyUI's):
+How quickly each engine lets the card go, measured the same day on the same card against the same
+ComfyUI (median of three runs, every image identical to ComfyUI's). The last column says which rustyui
+build each row comes from: fa472d4 is the code in this repository; 20ab388 is the build just before it,
+which loads and frees the models the same way but paused between small uploads.
 
-| SDXL graph | | ComfyUI | rustyui |
-|---|---|---|---|
-| lighthouse, 1216x832 | VRAM held after the job | 7155 MiB | 7207 MiB |
-| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.16 s |
-| two LoRAs, 1024x1792 | VRAM held after the job | 7157 MiB | 8232 MiB |
-| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.15 s |
-| lighthouse-hires, to 1824x1248 | VRAM held after the job | 7253 MiB | 7922 MiB |
-| | `POST /free` to under 1 GiB above idle | 0.15 s | 0.17 s |
+| SDXL graph | | ComfyUI | rustyui | rustyui build |
+|---|---|---|---|---|
+| lighthouse, 1216x832 | VRAM held after the job | 7155 MiB | 7207 MiB | 20ab388 |
+| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.16 s | 20ab388 |
+| two LoRAs, 1024x1792 | VRAM held after the job | 7157 MiB | 8232 MiB | fa472d4 |
+| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.15 s | fa472d4 |
+| lighthouse-hires, to 1824x1248 | VRAM held after the job | 7253 MiB | 7922 MiB | 20ab388 |
+| | `POST /free` to under 1 GiB above idle | 0.15 s | 0.17 s | 20ab388 |
 
-After a free each engine keeps its CUDA context, about 530 MiB for ComfyUI and 470 MiB for rustyui,
-until the process ends. Before these changes rustyui took 0.44 s to get there: it unmapped the
-checkpoint (about 0.25 s for 6.6 GiB of read pages) before the first model left the card. It also held
-about 0.6 GB more on the lighthouse graphs, with three copies of each of CLIP-G's fused attention
-projections. The two-LoRA figure includes freed memory the allocator keeps for the next job.
+"VRAM held" counts freed memory the allocator keeps for the next job, so it depends on the build: on the
+two-LoRA graph 20ab388 held 7463 MiB and fa472d4 holds 8232 MiB, so expect the fa472d4 figure for the
+other two graphs to be somewhat higher than shown. The free times do not depend on it. After a free each
+engine keeps its CUDA context, about 530 MiB for ComfyUI and 470 MiB for rustyui, until the process ends.
+
+Before these changes rustyui took 0.44 s to get under 1 GiB: it unmapped the checkpoint (about 0.25 s for
+6.6 GiB of read pages) before the first model left the card. It also held about 0.6 GB more, with three
+copies of each of CLIP-G's fused attention projections. On the two-LoRA graph the UNet with its LoRAs now
+loads in 0.72 s (0.95 s before) and a cold run takes 8.8 s from process start (9.0 s before).
 
 From a cold start rustyui is done in about half to two thirds of ComfyUI's time: the server answers in
 0.2 s against about 5 s, and its GPU kernels come from a compile cache kept in its own cache folder.

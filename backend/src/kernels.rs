@@ -1336,11 +1336,15 @@ pub fn torch_linear_channels_first(x_cf: &Tensor, w: &Tensor, b: &Tensor) -> Res
 use candle_core::cuda_backend::cudarc::driver::{result as drv, CudaEvent, DevicePtrMut, DeviceRepr, PinnedHostSlice};
 
 /// A page-locked staging buffer in two halves, and for each half the event its last upload
-/// recorded, so a half is refilled only once the card has read it
+/// recorded, so a half is refilled only once the card has read it. Uploads fill the current half
+/// one after another (`used` bytes of it so far) and move to the other half only when the next one
+/// does not fit: with a half per upload, every small tensor (a LoRA's up and down, a bias) waited
+/// for the copy two uploads back, which sits behind whatever the card was given meanwhile.
 struct Staging {
     buf: PinnedHostSlice<u8>,
     done: [Option<CudaEvent>; 2],
-    next: usize,
+    cur: usize,
+    used: usize,
 }
 
 thread_local! {
@@ -1430,22 +1434,27 @@ fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(src: UploadSr
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
             let buf = unsafe { stream.context().alloc_pinned::<u8>(2 * STAGE_HALF) }.w()?;
-            *slot = Some(Staging { buf, done: [None, None], next: 0 });
+            *slot = Some(Staging { buf, done: [None, None], cur: 0, used: 0 });
         }
         let s = slot.as_mut().unwrap();
         let (base, _guard) = dst.device_ptr_mut(&stream);
         let mut off = 0;
         while off < len {
             let n = (len - off).min(STAGE_HALF);
-            let h = s.next;
-            s.next ^= 1;
-            if let Some(e) = s.done[h].take() {
-                e.synchronize().w()?;
+            if s.used + n > STAGE_HALF {
+                s.cur ^= 1;
+                s.used = 0;
+                if let Some(e) = s.done[s.cur].take() {
+                    e.synchronize().w()?;
+                }
             }
-            let host = &mut s.buf.as_mut_slice().w()?[h * STAGE_HALF..h * STAGE_HALF + n];
+            let at = s.cur * STAGE_HALF + s.used;
+            let host = &mut s.buf.as_mut_slice().w()?[at..at + n];
             src.copy_to(off, host)?;
             unsafe { drv::memcpy_htod_async(base + off as u64, &host[..], stream.cu_stream()) }.w()?;
-            s.done[h] = Some(stream.record_event(None).w()?);
+            // the half's last copy so far: once it is done, so are the ones before it
+            s.done[s.cur] = Some(stream.record_event(None).w()?);
+            s.used += n.next_multiple_of(4096);
             off += n;
         }
         Ok(())

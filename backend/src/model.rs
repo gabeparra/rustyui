@@ -19,13 +19,56 @@ pub struct File {
     pub path: PathBuf,
     names: HashSet<String>,
     used: RefCell<HashSet<String>>,
+    /// the file again, to read weights from with pread (File::upload), and where each tensor's
+    /// bytes are in it; None when the header could not be read that way (the mapping serves)
+    direct: Option<(std::fs::File, HashMap<String, (u64, u64)>)>,
+}
+
+/// RUSTYUI_MMAP_LOAD=1: weights go to the card from the memory-mapped file as before (the driver
+/// stages them from pageable memory)
+fn mmap_load() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RUSTYUI_MMAP_LOAD").is_some_and(|v| v != "0"))
+}
+
+/// Each tensor's byte range in a safetensors file, from its header: (8 + header length + begin,
+/// 8 + header length + end) for its data_offsets [begin, end)
+fn byte_ranges(f: &std::fs::File) -> Result<HashMap<String, (u64, u64)>> {
+    use std::os::unix::fs::FileExt;
+    let mut n = [0u8; 8];
+    f.read_exact_at(&mut n, 0)?;
+    let n = u64::from_le_bytes(n);
+    anyhow::ensure!(n <= 100_000_000, "a header of {n} bytes");
+    let mut header = vec![0u8; n as usize];
+    f.read_exact_at(&mut header, 8)?;
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&header)?;
+    let mut out = HashMap::new();
+    for (name, t) in map {
+        if name == "__metadata__" {
+            continue;
+        }
+        let o = t["data_offsets"].as_array().context("no data_offsets")?;
+        let (Some(b), Some(e)) = (o.first().and_then(|v| v.as_u64()), o.get(1).and_then(|v| v.as_u64())) else {
+            bail!("{name}: data_offsets {o:?}");
+        };
+        out.insert(name, (8 + n + b, 8 + n + e));
+    }
+    Ok(out)
 }
 
 impl File {
     pub fn open(path: &Path) -> Result<Rc<File>> {
         let st = unsafe { MmapedSafetensors::new(path) }.with_context(|| format!("open {}", path.display()))?;
         let names = st.tensors().into_iter().map(|(n, _)| n).collect();
-        Ok(Rc::new(File { st, path: path.to_path_buf(), names, used: RefCell::new(HashSet::new()) }))
+        let direct = std::fs::File::open(path).map_err(anyhow::Error::from).and_then(|f| Ok((byte_ranges(&f)?, f)));
+        let direct = match direct {
+            Ok((ranges, f)) => Some((f, ranges)),
+            Err(e) => {
+                eprintln!("[engine] {}: weights read through the mapping ({e:#})", path.display());
+                None
+            }
+        };
+        Ok(Rc::new(File { st, path: path.to_path_buf(), names, used: RefCell::new(HashSet::new()), direct }))
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -33,7 +76,37 @@ impl File {
     }
 
     pub fn load(&self, name: &str, dev: &Device) -> Result<Tensor> {
+        if let Some(t) = self.upload(name, dev)? {
+            return Ok(t);
+        }
         self.st.load(name, dev).with_context(|| format!("{}: {name}", self.path.display()))
+    }
+
+    /// A tensor read from the file with pread and uploaded through the pinned buffer
+    /// (kernels::upload_from): the bytes the mapping holds, so the same tensor. None for what that
+    /// does not serve (a CPU load, a dtype it does not take, RUSTYUI_MMAP_LOAD=1).
+    fn upload(&self, name: &str, dev: &Device) -> Result<Option<Tensor>> {
+        let Some((f, ranges)) = &self.direct else { return Ok(None) };
+        if !dev.is_cuda() || mmap_load() {
+            return Ok(None);
+        }
+        let Some(&(b, e)) = ranges.get(name) else { return Ok(None) };
+        let view = self.st.get(name).with_context(|| format!("{}: {name}", self.path.display()))?;
+        let dtype = match view.dtype() {
+            safetensors::Dtype::F16 => DType::F16,
+            safetensors::Dtype::BF16 => DType::BF16,
+            safetensors::Dtype::F32 => DType::F32,
+            safetensors::Dtype::U8 => DType::U8,
+            _ => return Ok(None),
+        };
+        // the header this file was mapped with says the same (a cheap guard against a file
+        // replaced on disk since the mapping was made)
+        if (e - b) as usize != view.data().len() {
+            return Ok(None);
+        }
+        let src = crate::kernels::UploadSrc::File { file: f, offset: b, len: (e - b) as usize };
+        let t = crate::kernels::upload_from(src, dtype, view.shape(), dev).with_context(|| format!("{}: {name}", self.path.display()))?;
+        Ok(Some(t))
     }
 
     /// LoRA modules this file has that nothing asked for.
@@ -507,4 +580,39 @@ pub fn clip_g_map() -> Box<dyn Fn(&str) -> Mapped> {
             _ => Mapped::Key(format!("{p}.{n}")),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    /// The byte ranges File::upload reads are the bytes the mapping holds, at offsets of every
+    /// alignment
+    #[test]
+    fn byte_ranges_are_the_mapped_bytes() {
+        let dir = std::env::temp_dir().join(format!("rustyui-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.safetensors");
+        let cpu = Device::Cpu;
+        let mut m = HashMap::new();
+        m.insert("fused".to_string(), Tensor::arange(0f32, 36.0, &cpu).unwrap().reshape((12, 3)).unwrap());
+        m.insert("odd".to_string(), Tensor::arange(0f32, 5.0, &cpu).unwrap().to_dtype(DType::F16).unwrap());
+        m.insert("bias".to_string(), Tensor::arange(0f32, 9.0, &cpu).unwrap().to_dtype(DType::BF16).unwrap());
+        candle_core::safetensors::save(&m, &path).unwrap();
+        let f = std::fs::File::open(&path).unwrap();
+        let ranges = byte_ranges(&f).unwrap();
+        let st = unsafe { MmapedSafetensors::new(&path) }.unwrap();
+        assert_eq!(ranges.len(), 3);
+        let read = |off: u64, len: usize| {
+            let mut buf = vec![0u8; len];
+            f.read_exact_at(&mut buf, off).unwrap();
+            buf
+        };
+        for (name, view) in st.tensors() {
+            let (b, e) = ranges[&name];
+            assert_eq!(read(b, (e - b) as usize), view.data(), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

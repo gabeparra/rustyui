@@ -1349,29 +1349,80 @@ thread_local! {
 
 const STAGE_HALF: usize = 64 << 20;
 
+/// Where an upload's bytes come from
+#[derive(Clone, Copy)]
+pub enum UploadSrc<'a> {
+    /// memory: a slice of a memory-mapped file, or bytes folded on the host
+    Bytes(&'a [u8]),
+    /// `len` bytes of a file from `offset`, read with pread: the kernel copies them from its page
+    /// cache into the pinned buffer, and the process never maps those pages, so nothing has to
+    /// be unmapped when the file is let go (reading a whole SDXL checkpoint through its mapping
+    /// left 0.25 s of unmapping for the end of the session)
+    File { file: &'a std::fs::File, offset: u64, len: usize },
+}
+
+impl UploadSrc<'_> {
+    fn len(&self) -> usize {
+        match self {
+            UploadSrc::Bytes(b) => b.len(),
+            UploadSrc::File { len, .. } => *len,
+        }
+    }
+
+    /// bytes [off, off + dst.len()) of the source into `dst`, in pieces of at least 1 MiB on up to
+    /// four threads, which take the page faults (or the reads) side by side
+    fn copy_to(&self, off: usize, dst: &mut [u8]) -> Result<()> {
+        let part = dst.len().div_ceil(4).max(1 << 20);
+        let one = |at: usize, d: &mut [u8]| -> std::io::Result<()> {
+            match self {
+                UploadSrc::Bytes(b) => {
+                    d.copy_from_slice(&b[at..at + d.len()]);
+                    Ok(())
+                }
+                UploadSrc::File { file, offset, .. } => std::os::unix::fs::FileExt::read_exact_at(*file, d, offset + at as u64),
+            }
+        };
+        let r = if dst.len() <= part {
+            one(off, dst)
+        } else {
+            std::thread::scope(|sc| {
+                let jobs: Vec<_> = dst.chunks_mut(part).enumerate().map(|(i, d)| sc.spawn(move || one(off + i * part, d))).collect();
+                jobs.into_iter().try_for_each(|j| j.join().unwrap_or_else(|_| Err(std::io::Error::other("upload: a copy thread panicked"))))
+            })
+        };
+        r.map_err(|e| candle_core::Error::Msg(format!("upload: reading the weights: {e}")))
+    }
+}
+
 /// One checkpoint tensor's bytes (a slice of the memory-mapped file) onto the card as `dtype` of
 /// `shape`. MmapedSafetensors::load copies them into a Vec and the driver stages that again, about
 /// 4 GB/s; here they go a piece at a time into alternate halves of a pinned buffer, each piece
 /// uploaded by DMA while the next is copied. Same bytes, same tensor.
 pub fn upload(bytes: &[u8], dtype: DType, shape: &[usize], dev: &candle_core::Device) -> Result<Tensor> {
+    upload_from(UploadSrc::Bytes(bytes), dtype, shape, dev)
+}
+
+/// upload, from memory or straight from the file (UploadSrc)
+pub fn upload_from(src: UploadSrc, dtype: DType, shape: &[usize], dev: &candle_core::Device) -> Result<Tensor> {
     let d = match dev {
         candle_core::Device::Cuda(d) => d.clone(),
         _ => candle_core::bail!("upload: not a CUDA device"),
     };
     match dtype {
-        DType::U8 => upload_as::<u8>(bytes, &d, shape),
-        DType::BF16 => upload_as::<half::bf16>(bytes, &d, shape),
-        DType::F16 => upload_as::<half::f16>(bytes, &d, shape),
-        DType::F32 => upload_as::<f32>(bytes, &d, shape),
+        DType::U8 => upload_as::<u8>(src, &d, shape),
+        DType::BF16 => upload_as::<half::bf16>(src, &d, shape),
+        DType::F16 => upload_as::<half::f16>(src, &d, shape),
+        DType::F32 => upload_as::<f32>(src, &d, shape),
         other => candle_core::bail!("upload: {other:?} is not handled"),
     }
 }
 
-fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(bytes: &[u8], d: &CudaDevice, shape: &[usize]) -> Result<Tensor> {
+fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(src: UploadSrc, d: &CudaDevice, shape: &[usize]) -> Result<Tensor> {
     let size = std::mem::size_of::<T>();
     let n_elem: usize = shape.iter().product();
-    if bytes.len() != n_elem * size {
-        candle_core::bail!("upload: {} bytes for {shape:?} of {size}-byte values", bytes.len());
+    let len = src.len();
+    if len != n_elem * size {
+        candle_core::bail!("upload: {len} bytes for {shape:?} of {size}-byte values");
     }
     let stream = d.cuda_stream();
     let mut dst = unsafe { stream.alloc::<T>(n_elem) }.w()?;
@@ -1384,22 +1435,15 @@ fn upload_as<T: candle_core::cuda_backend::CudaDType + DeviceRepr>(bytes: &[u8],
         let s = slot.as_mut().unwrap();
         let (base, _guard) = dst.device_ptr_mut(&stream);
         let mut off = 0;
-        while off < bytes.len() {
-            let n = (bytes.len() - off).min(STAGE_HALF);
+        while off < len {
+            let n = (len - off).min(STAGE_HALF);
             let h = s.next;
             s.next ^= 1;
             if let Some(e) = s.done[h].take() {
                 e.synchronize().w()?;
             }
             let host = &mut s.buf.as_mut_slice().w()?[h * STAGE_HALF..h * STAGE_HALF + n];
-            // four threads take the page faults of the memory-mapped file side by side
-            let src = &bytes[off..off + n];
-            let part = n.div_ceil(4).max(1 << 20);
-            std::thread::scope(|sc| {
-                for (dst, src) in host.chunks_mut(part).zip(src.chunks(part)) {
-                    sc.spawn(move || dst.copy_from_slice(src));
-                }
-            });
+            src.copy_to(off, host)?;
             unsafe { drv::memcpy_htod_async(base + off as u64, &host[..], stream.cu_stream()) }.w()?;
             s.done[h] = Some(stream.record_event(None).w()?);
             off += n;
@@ -3577,4 +3621,30 @@ pub fn torch_bgemm_bf16(
         })?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// UploadSrc::copy_to gives the same bytes from memory and from the file, in one piece and in
+    /// the pieces its threads copy
+    #[test]
+    fn upload_sources_agree() {
+        let path = std::env::temp_dir().join(format!("rustyui-upload-{}", std::process::id()));
+        let bytes: Vec<u8> = (0..(5usize << 20) + 3).map(|i| (i.wrapping_mul(2654435761) >> 7) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let src = UploadSrc::File { file: &file, offset: 0, len: bytes.len() };
+        for (off, n) in [(0, 10), (12345, 1 << 20), (7, (4 << 20) + 11), (bytes.len() - 5, 5)] {
+            let (mut a, mut b) = (vec![0u8; n], vec![0u8; n]);
+            src.copy_to(off, &mut a).unwrap();
+            UploadSrc::Bytes(&bytes).copy_to(off, &mut b).unwrap();
+            assert_eq!(a, &bytes[off..off + n]);
+            assert_eq!(b, &bytes[off..off + n]);
+        }
+        let past = UploadSrc::File { file: &file, offset: 10, len: bytes.len() };
+        assert!(past.copy_to(bytes.len() - 20, &mut [0u8; 20]).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
 }

@@ -104,8 +104,31 @@ fn render(graph: serde_json::Value, out: PathBuf) -> Result<()> {
 
 use paths::models_dir;
 
+/// The driver compiles the PTX of candle's and rustyui's kernels for the card the first time a
+/// process loads each module, about 5 s in all, and keeps the result in its JIT cache: by default
+/// ~/.nv/ComputeCache, 256 MiB for every program on the machine, and gone with the container in a
+/// container run. rustyui's own cache folder holds it instead (dev/run.sh mounts that folder), big
+/// enough for what rustyui loads, so later starts load the compiled kernels. The same PTX gives the
+/// same machine code either way. CUDA_CACHE_PATH and CUDA_CACHE_MAXSIZE set outside still win.
+fn jit_cache() {
+    if std::env::var_os("CUDA_CACHE_PATH").is_none() {
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+        if let Some(dir) = base.map(|b| b.join("rustyui").join("cuda-jit")) {
+            if std::fs::create_dir_all(&dir).is_ok() {
+                std::env::set_var("CUDA_CACHE_PATH", dir);
+            }
+        }
+    }
+    if std::env::var_os("CUDA_CACHE_MAXSIZE").is_none() {
+        std::env::set_var("CUDA_CACHE_MAXSIZE", (4u64 << 30).to_string());
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    jit_cache();
     // --models and --out win over the environment, and reach every part that reads it
     if let Some(dir) = arg(&args, "--models") {
         std::env::set_var("RUSTYUI_MODELS", dir);

@@ -175,6 +175,14 @@ pub struct Engine {
     /// encoders loaded with the LoRA patches settled, so a reload starts settled
     clip_settled: std::collections::HashSet<String>,
     unet: Option<LoadedUnet>,
+    /// the SDXL VAE's decoder and encoder and the last upscale model, by file: like the text
+    /// encoders and the UNet they stay on the card between nodes and graphs while there is room
+    /// for what runs next (Engine::make_room), as ComfyUI keeps its loaded models
+    vae_dec: Option<(PathBuf, Rc<Decoder>)>,
+    vae_enc: Option<(PathBuf, Rc<Encoder>)>,
+    esrgan: Option<(PathBuf, Rc<Esrgan>)>,
+    /// RUSTYUI_ONE_MODEL=1: the old way, one model on the card at a time
+    one_model: bool,
     /// SAM3Segment's model, kept between graphs as the node's processor cache keeps it
     sam3: Option<Rc<crate::sam3::Sam3>>,
     /// Gemma 3 and the projection's checkpoint, kept between an LTX graph's prompts
@@ -189,6 +197,24 @@ pub struct Engine {
     /// as refs/graph_nodes_ref.py names ComfyUI's
     dump: Option<HashMap<String, Tensor>>,
 }
+
+/// a model Engine::make_room keeps on the card
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Nothing,
+    Esrgan,
+    VaeEnc,
+    VaeDec,
+    Clip,
+    Unet,
+}
+
+/// VRAM to load both SDXL text encoders (1.6 GB in f16) and encode a prompt
+const CLIP_NEED: usize = 3 << 30;
+/// VRAM to load an SDXL UNet (4.9 GB in f16) with its LoRAs folded in
+const UNET_NEED: usize = 11 << 29;
+/// ImageUpscaleWithModel's estimate for a 4x model: (512 * 512 * 3) * 4 bytes * 4 * 384, and the model
+const UPSCALE_NEED: usize = 512 * 512 * 3 * 4 * 4 * 384 + (128 << 20);
 
 fn stack_key(s: &Stack, extra: &str) -> String {
     let mut k = format!("{}|{extra}", s.ckpt.display());
@@ -274,6 +300,10 @@ impl Engine {
             sigmas_on_card: std::collections::HashSet::new(),
 
             unet: None,
+            vae_dec: None,
+            vae_enc: None,
+            esrgan: None,
+            one_model: std::env::var_os("RUSTYUI_ONE_MODEL").is_some_and(|v| v != "0"),
             sam3: None,
             ltx_te: None,
             saved: vec![],
@@ -292,6 +322,64 @@ impl Engine {
                 self.peak_vram_mb = self.peak_vram_mb.max(used);
             }
         }
+    }
+
+    /// free VRAM in bytes, as cudaMemGetInfo reports it
+    fn free_vram(&self) -> Result<usize> {
+        match &self.dev {
+            Device::Cuda(d) => Ok(d.cuda_stream().context().mem_get_info().map_err(|e| anyhow::anyhow!("free VRAM: {e:?}"))?.0),
+            _ => Ok(usize::MAX),
+        }
+    }
+
+    /// Lets the SDXL models on the card go, the quickest to load again first, until `need` bytes
+    /// are free, keeping `keep`. The video and Anima models always go (they need most of the card).
+    /// With RUSTYUI_ONE_MODEL every other model goes, as before.
+    fn make_room(&mut self, need: usize, keep: Keep) -> Result<()> {
+        self.ltx_te = None;
+        self.ltx_dit = None;
+        let order = [Keep::Esrgan, Keep::VaeEnc, Keep::VaeDec, Keep::Clip, Keep::Unet];
+        let mut dropped = false;
+        for k in order {
+            if k == keep {
+                continue;
+            }
+            if !self.one_model {
+                if dropped {
+                    self.dev.synchronize()?;
+                    dropped = false;
+                }
+                if self.free_vram()? >= need {
+                    break;
+                }
+            }
+            let had = match k {
+                Keep::Esrgan => self.esrgan.take().is_some(),
+                Keep::VaeEnc => self.vae_enc.take().is_some(),
+                Keep::VaeDec => self.vae_dec.take().is_some(),
+                Keep::Clip => self.clip.take().is_some(),
+                Keep::Unet => self.unet.take().is_some(),
+                Keep::Nothing => false,
+            };
+            dropped |= had;
+        }
+        if dropped {
+            self.dev.synchronize()?;
+        }
+        Ok(())
+    }
+
+    /// Every SDXL model but `keep` off the card, after an attempt ran out of memory beside them;
+    /// false when there was nothing to let go (the error stands)
+    fn room_after_oom(&mut self, keep: Keep) -> Result<bool> {
+        let before = [self.esrgan.is_some(), self.vae_enc.is_some(), self.vae_dec.is_some(), self.clip.is_some(), self.unet.is_some()];
+        let had = before.iter().zip([Keep::Esrgan, Keep::VaeEnc, Keep::VaeDec, Keep::Clip, Keep::Unet]).any(|(h, k)| *h && k != keep);
+        if !had {
+            return Ok(false);
+        }
+        self.make_room(usize::MAX, keep)?;
+        eprintln!("[engine] out of memory beside the models kept on the card: let them go and ran again");
+        Ok(true)
     }
 
     fn file(&mut self, path: &Path) -> Result<Rc<File>> {
@@ -643,10 +731,6 @@ impl Engine {
                     _ => bail!("VAEDecode: not a latent"),
                 };
                 let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEDecode: not a vae") };
-                self.unet = None; // one model in VRAM at a time
-                self.clip = None;
-                self.ltx_te = None;
-                self.ltx_dit = None;
                 vec![Val::Image(self.vae_decode(&z, &path)?)]
             }
             "UpscaleModelLoader" => {
@@ -658,19 +742,32 @@ impl Engine {
                     bail!("ImageUpscaleWithModel: not an upscale model")
                 };
                 let Val::Image(img) = self.input(&inp, "image")? else { bail!("ImageUpscaleWithModel: not an image") };
-                self.unet = None;
-                self.clip = None;
-                self.ltx_te = None;
-                self.ltx_dit = None;
                 // a picture ComfyUI holds as NHWC memory runs the whole model channels-last
                 let nhwc = self.image_nhwc(&inp, "image")?;
                 let t = Instant::now();
-                let model = Esrgan::load(&path, &self.dev)?;
-                let mut outs = vec![];
-                for i in 0..img.dim(0)? {
-                    outs.push(model.upscale(&img.narrow(0, i, 1)?, nhwc)?);
-                }
-                let out = Tensor::cat(&outs, 0)?;
+                // ImageUpscaleWithModel's own estimate: the model and 384 times a 512-pixel tile's
+                // f32 input times the scale
+                self.make_room(UPSCALE_NEED, Keep::Esrgan)?;
+                let model = match &self.esrgan {
+                    Some((p, m)) if p == &path => m.clone(),
+                    _ => {
+                        self.esrgan = None;
+                        let m = Rc::new(Esrgan::load(&path, &self.dev)?);
+                        self.esrgan = Some((path.clone(), m.clone()));
+                        m
+                    }
+                };
+                let run = |model: &Esrgan| -> Result<Tensor> {
+                    let mut outs = vec![];
+                    for i in 0..img.dim(0)? {
+                        outs.push(model.upscale(&img.narrow(0, i, 1)?, nhwc)?);
+                    }
+                    Ok(Tensor::cat(&outs, 0)?)
+                };
+                let out = match run(&model) {
+                    Err(e) if ltx_nodes::is_oom(&e) && self.room_after_oom(Keep::Esrgan)? => run(&model)?,
+                    r => r?,
+                };
                 self.dev.synchronize()?;
                 self.vram();
                 self.timings.push((format!("upscale x{}", model.scale), t.elapsed().as_secs_f64()));
@@ -709,10 +806,6 @@ impl Engine {
                 let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEEncode: not a vae") };
                 // a picture ComfyUI holds as NHWC memory keeps the encoder's residual stream channels-last
                 let nhwc = self.image_nhwc(&inp, "pixels")?;
-                self.unet = None;
-                self.clip = None;
-                self.ltx_te = None;
-                self.ltx_dit = None;
                 vec![Val::Latent(self.vae_encode(&img, nhwc, &path)?)]
             }
             "SaveImage" => {
@@ -771,10 +864,8 @@ impl Engine {
         let c = &c;
         let key = stack_key(c, "clip");
         if self.clip.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
-            self.unet = None;
             self.clip = None;
-            self.ltx_te = None;
-            self.ltx_dit = None;
+            self.make_room(CLIP_NEED, Keep::Nothing)?;
             let t = Instant::now();
             let file = self.file(&c.ckpt)?;
             let mut loras = vec![];
@@ -882,6 +973,12 @@ impl Engine {
         // ModelPatcher's copy of it (DynamicVRAM does not run hooks)
         let classic = all.iter().any(|c| c.props.hooks.is_some());
         self.load_unet(m, classic)?;
+        {
+            // the sampler's activations: about 64 KiB a latent pixel for each of the two CFG
+            // halves, plus a GiB (measured peaks are about 52 KiB at 1024x1792), beside the UNet
+            let (b, _, h, w) = latent.dims4()?;
+            self.make_room((1 << 30) + 2 * 65536 * b * h * w, Keep::Unet)?;
+        }
         // the hook groups in the order _calc_cond_batch meets them (the positive's, then the
         // negative's), each with the LoRAs its weights add to the base (none: the base itself)
         let mut groups: Vec<(Option<Rc<HookGroup>>, Vec<(PathBuf, f64)>)> = vec![];
@@ -1073,20 +1170,33 @@ impl Engine {
         let (_, _, h, w) = img.dims4()?;
         let (ch, cw) = (h / 8 * 8, w / 8 * 8);
         let img = img.narrow(2, (h % 8) / 2, ch)?.narrow(3, (w % 8) / 2, cw)?.contiguous()?;
-        let file = self.file(path)?;
-        let dev = self.dev.clone();
-        let z = {
-            let src = Source {
-                file: &file,
-                map: model::vae_map(),
-                loras: vec![],
-                lora_prefix: "",
-                compute: DType::BF16,
-                dtype: DType::BF16,
-                dev: &dev,
-                patching: Default::default(),
-            };
-            Encoder::load(&src)?.encode(&img, nhwc)?
+        // VAE.memory_used_encode: 1767 bytes a pixel for the SDXL VAE in bf16, ComfyUI's estimate
+        let (b, _, _, _) = img.dims4()?;
+        self.make_room(1767 * 2 * b * ch * cw, Keep::VaeEnc)?;
+        let enc = match &self.vae_enc {
+            Some((p, e)) if p == path => e.clone(),
+            _ => {
+                self.vae_enc = None;
+                let file = self.file(path)?;
+                let dev = self.dev.clone();
+                let src = Source {
+                    file: &file,
+                    map: model::vae_map(),
+                    loras: vec![],
+                    lora_prefix: "",
+                    compute: DType::BF16,
+                    dtype: DType::BF16,
+                    dev: &dev,
+                    patching: Default::default(),
+                };
+                let e = Rc::new(Encoder::load(&src)?);
+                self.vae_enc = Some((path.to_path_buf(), e.clone()));
+                e
+            }
+        };
+        let z = match enc.encode(&img, nhwc) {
+            Err(e) if ltx_nodes::is_oom(&e) && self.room_after_oom(Keep::VaeEnc)? => enc.encode(&img, nhwc)?,
+            r => r?,
         };
         self.dev.synchronize()?;
         self.vram();
@@ -1097,20 +1207,33 @@ impl Engine {
     /// VAE.decode of an SDXL latent to an IMAGE (b, 3, h, w)
     fn vae_decode(&mut self, z: &Tensor, path: &Path) -> Result<Tensor> {
         let t = Instant::now();
-        let file = self.file(path)?;
-        let dev = self.dev.clone();
-        let img = {
-            let src = Source {
-                file: &file,
-                map: model::vae_map(),
-                loras: vec![],
-                lora_prefix: "",
-                compute: DType::BF16,
-                dtype: DType::BF16,
-                dev: &dev,
-                patching: Default::default(),
-            };
-            Decoder::load(&src)?.decode(z)?
+        // VAE.memory_used_decode: 2178 * 64 bytes a latent pixel for the SDXL VAE in bf16
+        let (b, _, h, w) = z.dims4()?;
+        self.make_room(2178 * 64 * 2 * b * h * w, Keep::VaeDec)?;
+        let dec = match &self.vae_dec {
+            Some((p, d)) if p == path => d.clone(),
+            _ => {
+                self.vae_dec = None;
+                let file = self.file(path)?;
+                let dev = self.dev.clone();
+                let src = Source {
+                    file: &file,
+                    map: model::vae_map(),
+                    loras: vec![],
+                    lora_prefix: "",
+                    compute: DType::BF16,
+                    dtype: DType::BF16,
+                    dev: &dev,
+                    patching: Default::default(),
+                };
+                let d = Rc::new(Decoder::load(&src)?);
+                self.vae_dec = Some((path.to_path_buf(), d.clone()));
+                d
+            }
+        };
+        let img = match dec.decode(z) {
+            Err(e) if ltx_nodes::is_oom(&e) && self.room_after_oom(Keep::VaeDec)? => dec.decode(z)?,
+            r => r?,
         };
         self.dev.synchronize()?;
         self.vram();
@@ -1125,11 +1248,9 @@ impl Engine {
         if self.unet.as_ref().is_some_and(|u| u.key == key) {
             return Ok(());
         }
-        // the UNet replaces the text encoders in VRAM
-        self.clip = None;
-        self.ltx_te = None;
-        self.ltx_dit = None;
+        // the UNet goes beside the text encoders when there is room for it
         self.unet = None;
+        self.make_room(UNET_NEED, Keep::Nothing)?;
         let t = Instant::now();
         let file = self.file(&m.ckpt)?;
         let mut loras = vec![];
@@ -1870,6 +1991,9 @@ impl Engine {
 
     /// Drops every cached model (VRAM back to the pool).
     pub fn free(&mut self) {
+        self.vae_dec = None;
+        self.vae_enc = None;
+        self.esrgan = None;
         self.sam3 = None;
         self.clip = None;
         self.ltx_te = None;

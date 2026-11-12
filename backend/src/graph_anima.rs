@@ -145,6 +145,7 @@ impl Engine {
         self.anima = None;
         self.unet = None;
         self.ltx_dit = None;
+        (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
         let t = Instant::now();
         let loras = if m.loras.is_empty() { None } else { Some(anima::AnimaLoras::open(&m.loras)?) };
         let dit = anima::AnimaDit::load(&m.ckpt, &self.dev, loras.as_ref())?;

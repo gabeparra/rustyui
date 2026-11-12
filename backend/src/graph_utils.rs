@@ -408,6 +408,7 @@ impl Engine {
                     .join(crate::paths::contained(&ckpt).context("RIFE VFI: ckpt_name")?);
                 anyhow::ensure!(path.is_file(), "RIFE VFI: {} is not there (rustyui does not download it)", path.display());
                 (self.clip, self.unet, self.ltx_te) = (None, None, None);
+                (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
                 // the encoder runs channels-last when ComfyUI's frames are NHWC memory
                 let nhwc = self.image_nhwc(inp, "frames")?;
                 let t0 = Instant::now();

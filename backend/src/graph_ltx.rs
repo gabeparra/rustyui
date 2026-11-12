@@ -443,6 +443,7 @@ impl Engine {
                 let std = st.load("per_channel_statistics.std-of-means", &dev)?.to_dtype(DType::BF16)?;
                 let mean = st.load("per_channel_statistics.mean-of-means", &dev)?.to_dtype(DType::BF16)?;
                 (self.clip, self.unet, self.ltx_te) = (None, None, None);
+                (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
                 let t0 = Instant::now();
                 let run = || -> Result<Tensor> {
                     ltx_upsampler::upsample(&ltx_upsampler::LatentUpsampler::load(&model, &dev)?, video, &std, &mean)
@@ -512,6 +513,7 @@ impl Engine {
                 // a joint latent's audio, as unbind()[-1] picks it
                 let latent = l.audio.as_ref().context("LTXVAudioVAEDecode: the latent has no audio")?;
                 (self.clip, self.unet, self.ltx_te) = (None, None, None);
+                (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
                 let t0 = Instant::now();
                 let run = || -> Result<(Tensor, u32)> {
                     let a = ltx_audio::AudioVae::load(&vae, &dev)?;
@@ -604,6 +606,7 @@ impl Engine {
         let (_, _, ih, iw) = img.dims4()?;
         let px: Vec<f32> = img.narrow(0, 0, 1)?.permute((0, 2, 3, 1))?.flatten_all()?.to_vec1()?;
         (self.clip, self.unet, self.ltx_te) = (None, None, None);
+        (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
         let t0 = Instant::now();
         let encode =
             || -> Result<Tensor> { ltx_vae::VideoEncoder::load(vae, &dev)?.encode(&ltx_video::start_pixels(&px, iw, ih, lw, lh, &dev)?) };
@@ -624,6 +627,7 @@ impl Engine {
     pub(super) fn ltx_decode(&mut self, l: &LtxLatent, vae: &Path) -> Result<Val> {
         let video = l.video.as_ref().context("VAEDecode: the latent has no video (LTXVSeparateAVLatent first)")?;
         (self.clip, self.unet, self.ltx_te) = (None, None, None);
+        (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
         let size: usize = video.dims()[2..].iter().product();
         if self.ltx_decode_oom.is_some_and(|n| size >= n) {
             self.ltx_dit = None;
@@ -682,6 +686,7 @@ impl Engine {
         let fps = g.positive.frame_rate.unwrap_or(25.0);
         // everything else off the card; the DiT stays when it is this checkpoint
         (self.clip, self.unet, self.ltx_te) = (None, None, None);
+        (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
         if std::env::var_os("RUSTYUI_VRAM_DEBUG").is_some() {
             let (free, total) = candle_core::cuda_backend::cudarc::driver::result::mem_get_info()?;
             eprintln!(

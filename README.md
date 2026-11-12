@@ -69,8 +69,8 @@ The short version; [Installing](#installing) has the details and the build varia
 5. **Open** http://127.0.0.1:8190 for ComfyUI's editor, or http://127.0.0.1:8190/simple/ for the
    simple one.
 
-On a card with less memory, `--no-video` leaves the video nodes out; one model is held in VRAM at
-a time.
+On a card with less memory, `--no-video` leaves the video nodes out; the image models stay in VRAM
+only while there is room for what runs next.
 
 ## Features
 
@@ -89,8 +89,8 @@ a time.
 - **Custom node packs, ported natively.** Selected nodes from KJNodes, ComfyUI-Frame-Interpolation,
   comfyui_controlnet_aux, ComfyUI-RMBG, ComfyUI-Impact-Pack and ComfyUI-TiledAttentionCouple, in
   Rust, under their own names.
-- **Light on the machine.** One model in VRAM at a time, weights memory-mapped, models unloaded
-  after 90 s without work. Under systemd socket activation the process starts on the first
+- **Light on the machine.** Image models kept in VRAM only while there is room, weights
+  memory-mapped, models unloaded after 90 s without work. Under systemd socket activation the process starts on the first
   request and exits when idle.
 - **Loopback only.** Listens on `127.0.0.1` and refuses cross-site, DNS-rebinding and
   foreign-origin requests from browsers.
@@ -408,6 +408,7 @@ Diagnostic variables:
 |---|---|
 | `RUSTYUI_PROFILE=1` | time each kind of layer |
 | `RUSTYUI_NO_FLASH=1`, `RUSTYUI_NO_LT=1` | fall back from FlashAttention and from cuBLASLt, for comparison |
+| `RUSTYUI_ONE_MODEL=1` | let every other model go before each one loads, one model in VRAM at a time |
 | `RUSTYUI_BATCH_CFG=1` | batch the prompt and the negative even past ComfyUI's 4x padding limit (same arithmetic, one pass) |
 | `RUSTYUI_DUMP_NODES=FILE` | write every node's output tensors, for `backend/refs/cmp_nodes.py` |
 | `RUSTYUI_DUMP_SAMPLER=FILE` | write the sigmas and every sampler step |

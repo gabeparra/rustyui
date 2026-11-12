@@ -90,8 +90,8 @@ only while there is room for what runs next.
   comfyui_controlnet_aux, ComfyUI-RMBG, ComfyUI-Impact-Pack and ComfyUI-TiledAttentionCouple, in
   Rust, under their own names.
 - **Light on the machine.** Image models kept in VRAM only while there is room, weights
-  memory-mapped, models unloaded after 90 s without work. Under systemd socket activation the process starts on the first
-  request and exits when idle.
+  memory-mapped, models unloaded after 90 s without work. Under systemd socket activation the
+  process starts on the first request and exits when idle.
 - **Loopback only.** Listens on `127.0.0.1` and refuses cross-site, DNS-rebinding and
   foreign-origin requests from browsers.
 - **Optional prompt writer.** Point `--writer` at any GGUF Gemma 3 instruct model and the backend
@@ -529,32 +529,33 @@ with guides is next.
 
 ## Performance
 
-Measured on 2026-11-11 on an RTX 4090 (24 GB), rustyui at commit 01ec968 against ComfyUI 0.39.0 with
-default flags, the same graph, seed and files in both, and the same output from both (every SDXL image
-identical, every video frame identical). Each figure is the median of three runs; "from process start"
-means starting the engine and waiting for the finished file. Other hardware and versions will differ.
+Measured on 2026-11-12 on an RTX 4090 (24 GB), rustyui at commit 549179f against ComfyUI 0.39.0 with
+default flags, the same graph, seed and files in both, and the same output from both (all 18 images
+compared, identical to the pixel). Each figure is the median of three runs; "from process start" means
+starting the engine and waiting for the finished file, with the model files already in the page cache.
+Other hardware and versions will differ.
 
 | SDXL graph | | ComfyUI | rustyui |
 |---|---|---|---|
-| [`lighthouse.png`](docs/examples/lighthouse.png), 1216x832, 30 steps | from process start | 10.6 s | 12.5 s |
-| | warm, new seed | 3.8 s | 4.3 s |
-| | the 30 steps | 3.38 s | 3.59 s |
-| two LoRAs, 1024x1792, 30 steps | from process start | 14.4 s | 16.1 s |
-| | warm, new seed | 6.9 s | 7.8 s |
-| | the 30 steps | 6.30 s | 6.62 s |
-| [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 18.0 s | 21.7 s |
-| | warm, new seed | 10.8 s | 13.1 s |
+| [`lighthouse.png`](docs/examples/lighthouse.png), 1216x832, 30 steps | from process start | 10.6 s | 5.5 s |
+| | warm, new seed | 3.8 s | 3.9 s |
+| two LoRAs, 1024x1792, 30 steps | from process start | 14.5 s | 9.0 s |
+| | warm, new seed | 6.9 s | 7.1 s |
+| [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 20.2 s | 14.0 s |
+| | warm, new seed | 13.6 s | 11.3 s |
 
-So today rustyui is slower than ComfyUI on a 4090: about 5 to 6 percent in the sampling steps and
-12 to 22 percent for a whole graph. The rest of the gap is a one-time start-up of about 5 s inside
-the first job, about half a second per job loading the UNet and LoRAs, and a slower VAE decode and
-ESRGAN upscale. Where it is ahead: the server answers in 0.2 s against about 5 s, and it uses 4 to
-5 GB less GPU memory on every graph above.
+From a cold start rustyui is done in about half to two thirds of ComfyUI's time: the server answers in
+0.2 s against about 5 s, and its GPU kernels come from a compile cache kept in its own cache folder.
+Warm, with the models already loaded, the two are about level (ComfyUI's warm hires runs varied from 11.0
+to 13.9 s, so that row is the least certain); the sampling steps themselves are about 5 percent slower
+in rustyui. When the work stops, rustyui lets the card go: it unloads its models after 90 s without work
+and exits after 120 s with no request, so the card was back to its idle memory 131 s after the last job,
+where ComfyUI keeps its models (7.1 GB here) until it is stopped.
 
 LTX-2.3 is slower still with the published 42 GB bf16 DiT listed under
 [Supported models](#supported-models): it does not fit on a 24 GB card, so rustyui keeps 23 of its
 48 blocks on the card and streams the rest every step. On the [video example](#examples) (640x448,
-153 frames, 8 steps) a single run took 65.7 s from process start against ComfyUI's 42.1 s, and the
+153 frames, 8 steps) a single run on 2026-11-11 (commit 01ec968) took 65.7 s from process start against ComfyUI's 42.1 s, and the
 8 steps 27.6 s against 10.5 s.
 
 An earlier measurement on an RTX 4070 Ti SUPER had the two-LoRA graph at 15.0 s for rustyui against

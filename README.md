@@ -545,6 +545,25 @@ Other hardware and versions will differ.
 | [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 20.2 s | 14.0 s |
 | | warm, new seed | 13.6 s | 11.3 s |
 
+Letting the models go, measured on the same card on the same day against the same ComfyUI (median of
+three; rustyui at commit fa472d4 for the two-LoRA graph, 20ab388 for the other two, which load them
+the same way; every image identical to ComfyUI's):
+
+| SDXL graph | | ComfyUI | rustyui |
+|---|---|---|---|
+| lighthouse, 1216x832 | VRAM held after the job | 7155 MiB | 7207 MiB |
+| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.16 s |
+| two LoRAs, 1024x1792 | VRAM held after the job | 7157 MiB | 8232 MiB |
+| | `POST /free` to under 1 GiB above idle | 0.16 s | 0.15 s |
+| lighthouse-hires, to 1824x1248 | VRAM held after the job | 7253 MiB | 7922 MiB |
+| | `POST /free` to under 1 GiB above idle | 0.15 s | 0.17 s |
+
+After a free each engine keeps its CUDA context, about 530 MiB for ComfyUI and 470 MiB for rustyui,
+until the process ends. Before these changes rustyui took 0.44 s to get there: it unmapped the
+checkpoint (about 0.25 s for 6.6 GiB of read pages) before the first model left the card. It also held
+about 0.6 GB more on the lighthouse graphs, with three copies of each of CLIP-G's fused attention
+projections. The two-LoRA figure includes freed memory the allocator keeps for the next job.
+
 From a cold start rustyui is done in about half to two thirds of ComfyUI's time: the server answers in
 0.2 s against about 5 s, and its GPU kernels come from a compile cache kept in its own cache folder.
 Warm, with the models already loaded, the two are about level (ComfyUI's warm hires runs varied from 11.0

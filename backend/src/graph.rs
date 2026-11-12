@@ -638,19 +638,43 @@ impl Engine {
         crate::progress::check()?;
         let executing = crate::progress::Executing::new(id, &class);
         let t0 = Instant::now();
-        let out = match class.as_str() {
+        let out = match self.compute(id, &class, &inp) {
+            // a node that ran out of memory beside the models kept from earlier nodes runs once
+            // more without them, as it would have when only one model stayed on the card
+            Err(e) if ltx_nodes::is_oom(&e) && self.room_after_oom(Keep::Nothing)? => self.compute(id, &class, &inp)?,
+            r => r?,
+        };
+        let _ = t0;
+        executing.done();
+        if let Some(d) = self.dump.as_mut() {
+            for (i, v) in out.iter().enumerate() {
+                dump_val(&format!("{id}.{i}"), v, d)?;
+            }
+        }
+        self.memo.insert((id.to_string(), 0), out.clone());
+        // big results (a video's frames) are not kept: they would hold VRAM until the next graph
+        if out.iter().map(val_bytes).sum::<usize>() <= 256 << 20 {
+            let files = self.saved[saved_before..].to_vec();
+            self.cache.insert(sig, (out.clone(), files));
+        }
+        Ok(out)
+    }
+
+    /// What one node computes, from its inputs (eval has run the nodes they link to)
+    fn compute(&mut self, id: &str, class: &str, inp: &serde_json::Map<String, Value>) -> Result<Vec<Val>> {
+        Ok(match class {
             "CheckpointLoaderSimple" => {
-                let name = self.text_arg(&inp, "ckpt_name")?;
+                let name = self.text_arg(inp, "ckpt_name")?;
                 let path = self.model_path("checkpoints", &name)?;
                 let s = Rc::new(Stack::new(path.clone()));
                 vec![Val::Model(s.clone()), Val::Clip(s, -2), Val::Vae(path)]
             }
             "LoraLoader" | "LoraLoaderModelOnly" => {
-                let name = self.text_arg(&inp, "lora_name")?;
+                let name = self.text_arg(inp, "lora_name")?;
                 let path = self.model_path("loras", &name)?;
-                let sm = self.float_arg(&inp, "strength_model")?;
+                let sm = self.float_arg(inp, "strength_model")?;
                 // which model: 0 SDXL, 1 LTX (model only), 2 Anima
-                let (m, kind) = match self.input(&inp, "model")? {
+                let (m, kind) = match self.input(inp, "model")? {
                     Val::Model(m) => (m, 0),
                     Val::LtxModel(m) if class == "LoraLoaderModelOnly" => (m, 1),
                     Val::AnimaModel(m) => (m, 2),
@@ -668,18 +692,18 @@ impl Engine {
                 }];
                 if class == "LoraLoader" && kind == 2 {
                     // Anima's text encoder: a LoRA without lora_te keys leaves it as it is
-                    let clip = self.input(&inp, "clip")?;
+                    let clip = self.input(inp, "clip")?;
                     anyhow::ensure!(matches!(clip, Val::AnimaClip(_)), "LoraLoader: an Anima model with a clip that is not Qwen3-0.6B");
                     let st = unsafe { candle_core::safetensors::MmapedSafetensors::new(&path)? };
                     let te = st.tensors().into_iter().any(|(k, _)| !k.starts_with("lora_unet_"));
                     anyhow::ensure!(
-                        !te || self.float_arg(&inp, "strength_clip")? == 0.0,
+                        !te || self.float_arg(inp, "strength_clip")? == 0.0,
                         "LoraLoader: {name} has text-encoder keys; LoRAs on Anima's Qwen3 are not implemented yet"
                     );
                     out.push(clip);
                 } else if class == "LoraLoader" {
-                    let sc = self.float_arg(&inp, "strength_clip")?;
-                    let Val::Clip(c, layer) = self.input(&inp, "clip")? else { bail!("LoraLoader: clip input is not a clip") };
+                    let sc = self.float_arg(inp, "strength_clip")?;
+                    let Val::Clip(c, layer) = self.input(inp, "clip")? else { bail!("LoraLoader: clip input is not a clip") };
                     let mut c2 = (*c).clone();
                     if sc != 0.0 {
                         c2.loras.push((path, sc));
@@ -689,13 +713,13 @@ impl Engine {
                 out
             }
             "CLIPSetLastLayer" => {
-                let layer = self.arg(&inp, "stop_at_clip_layer")?.as_i64().context("stop_at_clip_layer is not a whole number")?;
-                let Val::Clip(c, _) = self.input(&inp, "clip")? else { bail!("CLIPSetLastLayer: not a clip") };
+                let layer = self.arg(inp, "stop_at_clip_layer")?.as_i64().context("stop_at_clip_layer is not a whole number")?;
+                let Val::Clip(c, _) = self.input(inp, "clip")? else { bail!("CLIPSetLastLayer: not a clip") };
                 vec![Val::Clip(c, layer)]
             }
             "CLIPTextEncode" => {
-                let text = self.text_arg(&inp, "text")?;
-                match self.input(&inp, "clip")? {
+                let text = self.text_arg(inp, "text")?;
+                match self.input(inp, "clip")? {
                     Val::Clip(c, layer) => {
                         let mut cond = self.encode(&c, layer, &text)?;
                         // CLIP.add_hooks_to_dict: a CLIP's apply_hooks_to_conds go into each prompt
@@ -708,8 +732,8 @@ impl Engine {
                 }
             }
             "ConditioningConcat" => {
-                let Val::Cond(to) = self.input(&inp, "conditioning_to")? else { bail!("ConditioningConcat: not conditioning") };
-                let Val::Cond(from) = self.input(&inp, "conditioning_from")? else { bail!("ConditioningConcat: not conditioning") };
+                let Val::Cond(to) = self.input(inp, "conditioning_to")? else { bail!("ConditioningConcat: not conditioning") };
+                let Val::Cond(from) = self.input(inp, "conditioning_from")? else { bail!("ConditioningConcat: not conditioning") };
                 let from0 = &from[0].cond;
                 let mut out = vec![];
                 for c in to.iter() {
@@ -718,48 +742,48 @@ impl Engine {
                 vec![Val::Cond(Rc::new(out))]
             }
             "EmptyLatentImage" => {
-                let w = self.int_arg(&inp, "width")?;
-                let h = self.int_arg(&inp, "height")?;
-                let b = self.int_arg(&inp, "batch_size")?;
+                let w = self.int_arg(inp, "width")?;
+                let h = self.int_arg(inp, "height")?;
+                let b = self.int_arg(inp, "batch_size")?;
                 vec![Val::Latent(Tensor::zeros((b, 4, h / 8, w / 8), DType::F32, &self.dev)?)]
             }
-            "KSampler" if matches!(self.input(&inp, "model")?, Val::AnimaModel(_)) => vec![self.anima_ksampler(&inp)?],
+            "KSampler" if matches!(self.input(inp, "model")?, Val::AnimaModel(_)) => vec![self.anima_ksampler(inp)?],
             "KSampler" => {
-                let (z, mask) = self.ksampler(&inp)?;
+                let (z, mask) = self.ksampler(inp)?;
                 vec![match mask {
                     Some(m) => Val::MaskedLatent(z, m),
                     None => Val::Latent(z),
                 }]
             }
-            "VAEDecode" if matches!(self.input(&inp, "samples")?, Val::LtxLatent(_)) => {
-                let Val::LtxLatent(l) = self.input(&inp, "samples")? else { unreachable!() };
-                let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEDecode: not a vae") };
+            "VAEDecode" if matches!(self.input(inp, "samples")?, Val::LtxLatent(_)) => {
+                let Val::LtxLatent(l) = self.input(inp, "samples")? else { unreachable!() };
+                let Val::Vae(path) = self.input(inp, "vae")? else { bail!("VAEDecode: not a vae") };
                 vec![self.ltx_decode(&l, &path)?]
             }
-            "VAEDecode" if matches!(self.input(&inp, "samples")?, Val::Latent(ref z) if z.rank() == 5) => {
-                let Val::Latent(z) = self.input(&inp, "samples")? else { unreachable!() };
-                let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEDecode: not a vae") };
+            "VAEDecode" if matches!(self.input(inp, "samples")?, Val::Latent(ref z) if z.rank() == 5) => {
+                let Val::Latent(z) = self.input(inp, "samples")? else { unreachable!() };
+                let Val::Vae(path) = self.input(inp, "vae")? else { bail!("VAEDecode: not a vae") };
                 vec![Val::Image(self.wan_decode(&z, &path)?)]
             }
             "VAEDecode" => {
-                let z = match self.input(&inp, "samples")? {
+                let z = match self.input(inp, "samples")? {
                     Val::Latent(z) | Val::MaskedLatent(z, _) => z,
                     _ => bail!("VAEDecode: not a latent"),
                 };
-                let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEDecode: not a vae") };
+                let Val::Vae(path) = self.input(inp, "vae")? else { bail!("VAEDecode: not a vae") };
                 vec![Val::Image(self.vae_decode(&z, &path)?)]
             }
             "UpscaleModelLoader" => {
-                let name = self.text_arg(&inp, "model_name")?;
+                let name = self.text_arg(inp, "model_name")?;
                 vec![Val::UpscaleModel(self.model_path("upscale_models", &name)?)]
             }
             "ImageUpscaleWithModel" => {
-                let Val::UpscaleModel(path) = self.input(&inp, "upscale_model")? else {
+                let Val::UpscaleModel(path) = self.input(inp, "upscale_model")? else {
                     bail!("ImageUpscaleWithModel: not an upscale model")
                 };
-                let Val::Image(img) = self.input(&inp, "image")? else { bail!("ImageUpscaleWithModel: not an image") };
+                let Val::Image(img) = self.input(inp, "image")? else { bail!("ImageUpscaleWithModel: not an image") };
                 // a picture ComfyUI holds as NHWC memory runs the whole model channels-last
-                let nhwc = self.image_nhwc(&inp, "image")?;
+                let nhwc = self.image_nhwc(inp, "image")?;
                 let t = Instant::now();
                 // ImageUpscaleWithModel's own estimate: the model and 384 times a 512-pixel tile's
                 // f32 input times the scale
@@ -793,11 +817,11 @@ impl Engine {
                 vec![Val::Image(out)]
             }
             "ImageScale" => {
-                let method = self.text_arg(&inp, "upscale_method")?;
-                let w = self.int_arg(&inp, "width")?;
-                let h = self.int_arg(&inp, "height")?;
-                let crop = self.text_arg(&inp, "crop")?;
-                let Val::Image(img) = self.input(&inp, "image")? else { bail!("ImageScale: not an image") };
+                let method = self.text_arg(inp, "upscale_method")?;
+                let w = self.int_arg(inp, "width")?;
+                let h = self.int_arg(inp, "height")?;
+                let crop = self.text_arg(inp, "crop")?;
+                let Val::Image(img) = self.input(inp, "image")? else { bail!("ImageScale: not an image") };
                 if !matches!(method.as_str(), "lanczos" | "bilinear") || crop != "disabled" || w == 0 || h == 0 {
                     bail!("ImageScale: only lanczos or bilinear to an explicit size, crop disabled, is implemented (got {method}, {w}x{h}, crop {crop})");
                 }
@@ -821,29 +845,29 @@ impl Engine {
                 vec![Val::Image(t2)]
             }
             "VAEEncode" => {
-                let Val::Image(img) = self.input(&inp, "pixels")? else { bail!("VAEEncode: not an image") };
-                let Val::Vae(path) = self.input(&inp, "vae")? else { bail!("VAEEncode: not a vae") };
+                let Val::Image(img) = self.input(inp, "pixels")? else { bail!("VAEEncode: not an image") };
+                let Val::Vae(path) = self.input(inp, "vae")? else { bail!("VAEEncode: not a vae") };
                 // a picture ComfyUI holds as NHWC memory keeps the encoder's residual stream channels-last
-                let nhwc = self.image_nhwc(&inp, "pixels")?;
+                let nhwc = self.image_nhwc(inp, "pixels")?;
                 vec![Val::Latent(self.vae_encode(&img, nhwc, &path)?)]
             }
             "SaveImage" => {
-                let prefix = self.text_arg(&inp, "filename_prefix")?;
-                let Val::Image(img) = self.input(&inp, "images")? else { bail!("SaveImage: not an image") };
+                let prefix = self.text_arg(inp, "filename_prefix")?;
+                let Val::Image(img) = self.input(inp, "images")? else { bail!("SaveImage: not an image") };
                 let graph = image::ascii_json(&Value::Object(self.graph.clone()));
                 let saved = image::save_png(&img, &self.out_dir, &prefix, &graph, &self.pnginfo)?;
                 self.saved.extend(saved);
                 vec![]
             }
-            other => match self.anima_node(other, &inp)?.map_or_else(|| self.ltx_node(other, &inp), |v| Ok(Some(v)))? {
+            other => match self.anima_node(other, inp)?.map_or_else(|| self.ltx_node(other, inp), |v| Ok(Some(v)))? {
                 Some(out) => out,
-                None => match self.util_node(other, &inp)? {
+                None => match self.util_node(other, inp)? {
                     Some(out) => out,
-                    None => match self.cond_node(other, &inp)? {
+                    None => match self.cond_node(other, inp)? {
                         Some(out) => out,
-                        None => match self.impact_node(other, &inp)? {
+                        None => match self.impact_node(other, inp)? {
                             Some(out) => out,
-                            None => match self.tac_node(other, &inp)? {
+                            None => match self.tac_node(other, inp)? {
                                 Some(out) => out,
                                 None => bail!("node type {other} (node {id}) is not implemented yet"),
                             },
@@ -851,21 +875,7 @@ impl Engine {
                     },
                 },
             },
-        };
-        let _ = t0;
-        executing.done();
-        if let Some(d) = self.dump.as_mut() {
-            for (i, v) in out.iter().enumerate() {
-                dump_val(&format!("{id}.{i}"), v, d)?;
-            }
-        }
-        self.memo.insert((id.to_string(), 0), out.clone());
-        // big results (a video's frames) are not kept: they would hold VRAM until the next graph
-        if out.iter().map(val_bytes).sum::<usize>() <= 256 << 20 {
-            let files = self.saved[saved_before..].to_vec();
-            self.cache.insert(sig, (out.clone(), files));
-        }
-        Ok(out)
+        })
     }
 
     fn encode(&mut self, c: &Stack, layer: i64, text: &str) -> Result<Cond> {
@@ -1154,6 +1164,8 @@ impl Engine {
                 Ok((out, rec.last.context("the sampler never called the model")?))
             });
             match result {
+                // beside the text encoders or a VAE kept from before: they go and it runs again
+                Err(e) if ltx_nodes::is_oom(&e) && self.room_after_oom(Keep::Unet)? => {}
                 Err(e) if hooked && !lean && ltx_nodes::is_oom(&e) => {
                     eprintln!("[engine] the hook groups' weights do not fit beside the sampler at this size: making each group's for its own calls");
                     self.hooks_lean = Some(self.hooks_lean.map_or(size, |n| n.min(size)));

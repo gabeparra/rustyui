@@ -109,18 +109,22 @@ use paths::models_dir;
 /// ~/.nv/ComputeCache, 256 MiB for every program on the machine, and gone with the container in a
 /// container run. rustyui's own cache folder holds it instead (dev/run.sh mounts that folder), big
 /// enough for what rustyui loads, so later starts load the compiled kernels. The same PTX gives the
-/// same machine code either way. CUDA_CACHE_PATH and CUDA_CACHE_MAXSIZE set outside still win.
+/// same machine code either way. CUDA_CACHE_PATH and CUDA_CACHE_MAXSIZE set outside still win, and
+/// the size is only raised for rustyui's own folder, never for a cache other programs share.
 fn jit_cache() {
-    if std::env::var_os("CUDA_CACHE_PATH").is_none() {
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
-        if let Some(dir) = base.map(|b| b.join("rustyui").join("cuda-jit")) {
-            if std::fs::create_dir_all(&dir).is_ok() {
-                std::env::set_var("CUDA_CACHE_PATH", dir);
-            }
-        }
+    if std::env::var_os("CUDA_CACHE_PATH").is_some() {
+        return;
     }
+    // XDG: a relative XDG_CACHE_HOME is to be ignored
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")).filter(|p| p.is_absolute()));
+    let Some(dir) = base.map(|b| b.join("rustyui").join("cuda-jit")) else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    std::env::set_var("CUDA_CACHE_PATH", dir);
     if std::env::var_os("CUDA_CACHE_MAXSIZE").is_none() {
         std::env::set_var("CUDA_CACHE_MAXSIZE", (4u64 << 30).to_string());
     }

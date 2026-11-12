@@ -795,7 +795,10 @@ impl Engine {
                     Some((p, m)) if p == &path => m.clone(),
                     _ => {
                         self.esrgan = None;
+                        let tl = Instant::now();
                         let m = Rc::new(Esrgan::load(&path, &self.dev)?);
+                        self.dev.synchronize()?;
+                        self.timings.push(("load upscale model".into(), tl.elapsed().as_secs_f64()));
                         self.esrgan = Some((path.clone(), m.clone()));
                         m
                     }
@@ -1223,7 +1226,10 @@ impl Engine {
                     dev: &dev,
                     patching: Default::default(),
                 };
+                let tl = Instant::now();
                 let e = Rc::new(Encoder::load(&src)?);
+                self.dev.synchronize()?;
+                self.timings.push(("load vae encoder".into(), tl.elapsed().as_secs_f64()));
                 self.vae_enc = Some((path.to_path_buf(), e.clone()));
                 e
             }
@@ -1263,7 +1269,10 @@ impl Engine {
                     dev: &dev,
                     patching: Default::default(),
                 };
+                let tl = Instant::now();
                 let d = Rc::new(Decoder::load(&src)?);
+                self.dev.synchronize()?;
+                self.timings.push(("load vae decoder".into(), tl.elapsed().as_secs_f64()));
                 self.vae_dec = Some((path.to_path_buf(), d.clone()));
                 d
             }

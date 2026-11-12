@@ -25,7 +25,7 @@ pub struct File {
 }
 
 /// RUSTYUI_MMAP_LOAD=1: weights go to the card from the memory-mapped file as before (the driver
-/// stages them from pageable memory)
+/// stages them from pageable memory, each of CLIP-G's q, k and v holding all of its fused in_proj)
 fn mmap_load() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RUSTYUI_MMAP_LOAD").is_some_and(|v| v != "0"))
@@ -56,6 +56,16 @@ fn byte_ranges(f: &std::fs::File) -> Result<HashMap<String, (u64, u64)>> {
     Ok(out)
 }
 
+/// The byte range and shape of rows [start, start + n) of a tensor stored at `offset`, `len`
+/// bytes long, of `shape` (row-major, so its rows are contiguous)
+fn cut_rows(offset: u64, len: usize, shape: &mut [usize], start: usize, n: usize) -> Result<(u64, usize)> {
+    let Some(&dim0) = shape.first() else { bail!("rows of a scalar") };
+    anyhow::ensure!(n > 0 && start + n <= dim0, "rows {start}..{} of {dim0}", start + n);
+    let row = len / dim0;
+    shape[0] = n;
+    Ok((offset + (start * row) as u64, n * row))
+}
+
 impl File {
     pub fn open(path: &Path) -> Result<Rc<File>> {
         let st = unsafe { MmapedSafetensors::new(path) }.with_context(|| format!("open {}", path.display()))?;
@@ -76,16 +86,26 @@ impl File {
     }
 
     pub fn load(&self, name: &str, dev: &Device) -> Result<Tensor> {
-        if let Some(t) = self.upload(name, dev)? {
+        if let Some(t) = self.upload(name, None, dev)? {
             return Ok(t);
         }
         self.st.load(name, dev).with_context(|| format!("{}: {name}", self.path.display()))
     }
 
-    /// A tensor read from the file with pread and uploaded through the pinned buffer
-    /// (kernels::upload_from): the bytes the mapping holds, so the same tensor. None for what that
-    /// does not serve (a CPU load, a dtype it does not take, RUSTYUI_MMAP_LOAD=1).
-    fn upload(&self, name: &str, dev: &Device) -> Result<Option<Tensor>> {
+    /// Rows [start, start + len) of a tensor (dim 0), on `dev`: only those rows' bytes go to the
+    /// card, where the mapping's way loads the whole tensor and narrows it, and the narrowed view
+    /// keeps all of it
+    pub fn load_rows(&self, name: &str, start: usize, len: usize, dev: &Device) -> Result<Tensor> {
+        if let Some(t) = self.upload(name, Some((start, len)), dev)? {
+            return Ok(t);
+        }
+        Ok(self.load(name, dev)?.narrow(0, start, len)?.contiguous()?)
+    }
+
+    /// A tensor (or rows of it) read from the file with pread and uploaded through the pinned
+    /// buffer (kernels::upload_from): the bytes the mapping holds, so the same tensor. None for
+    /// what that does not serve (a CPU load, a dtype it does not take, RUSTYUI_MMAP_LOAD=1).
+    fn upload(&self, name: &str, rows: Option<(usize, usize)>, dev: &Device) -> Result<Option<Tensor>> {
         let Some((f, ranges)) = &self.direct else { return Ok(None) };
         if !dev.is_cuda() || mmap_load() {
             return Ok(None);
@@ -104,8 +124,13 @@ impl File {
         if (e - b) as usize != view.data().len() {
             return Ok(None);
         }
-        let src = crate::kernels::UploadSrc::File { file: f, offset: b, len: (e - b) as usize };
-        let t = crate::kernels::upload_from(src, dtype, view.shape(), dev).with_context(|| format!("{}: {name}", self.path.display()))?;
+        let mut shape = view.shape().to_vec();
+        let (mut offset, mut len) = (b, (e - b) as usize);
+        if let Some((start, n)) = rows {
+            (offset, len) = cut_rows(offset, len, &mut shape, start, n).with_context(|| format!("{}: {name}", self.path.display()))?;
+        }
+        let src = crate::kernels::UploadSrc::File { file: f, offset, len };
+        let t = crate::kernels::upload_from(src, dtype, &shape, dev).with_context(|| format!("{}: {name}", self.path.display()))?;
         Ok(Some(t))
     }
 
@@ -222,7 +247,7 @@ impl Source<'_> {
                 if !self.file.has(&k) {
                     return Ok(None);
                 }
-                Ok(Some(self.file.load(&k, self.dev)?.narrow(0, start, len)?.contiguous()?))
+                Ok(Some(self.file.load_rows(&k, start, len, self.dev)?))
             }
         }
     }
@@ -587,8 +612,8 @@ mod tests {
     use super::*;
     use std::os::unix::fs::FileExt;
 
-    /// The byte ranges File::upload reads are the bytes the mapping holds, at offsets of every
-    /// alignment
+    /// The byte ranges File::upload reads (whole tensors, and rows cut from them) are the bytes
+    /// the mapping holds, at offsets of every alignment
     #[test]
     fn byte_ranges_are_the_mapped_bytes() {
         let dir = std::env::temp_dir().join(format!("rustyui-model-{}", std::process::id()));
@@ -613,6 +638,14 @@ mod tests {
             let (b, e) = ranges[&name];
             assert_eq!(read(b, (e - b) as usize), view.data(), "{name}");
         }
+        let (b, e) = ranges["fused"];
+        let mut shape = vec![12, 3];
+        let (off, len) = cut_rows(b, (e - b) as usize, &mut shape, 4, 4).unwrap();
+        assert_eq!(shape, [4, 3]);
+        let want = st.load("fused", &cpu).unwrap().narrow(0, 4, 4).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let got: Vec<f32> = read(off, len).chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(got, want);
+        assert!(cut_rows(b, (e - b) as usize, &mut [12, 3], 10, 4).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

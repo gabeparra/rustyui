@@ -498,6 +498,12 @@ count), so exactness holds against ComfyUI on the same machine. The example pict
 checked on an RTX 4090 against ComfyUI 0.39.0 (torch 2.11.0+cu130, cuDNN 9.19, comfy_kitchen
 0.2.37, comfy-aimdo 0.5.6) started with default flags, so DynamicVRAM was on.
 
+Which ComfyUI setup that is matters. ComfyUI started with `--disable-dynamic-vram` patches LoRAs into
+the weights another way, and on SDXL graphs with LoRAs its pictures differ from its own default-flag
+pictures (same composition, fine detail moved; each setup repeats itself exactly). rustyui matches the
+default, DynamicVRAM setup; against a ComfyUI run with `--disable-dynamic-vram`, expect the same
+differences ComfyUI shows between its two setups.
+
 | Piece | How rustyui runs it |
 |---|---|
 | Seeds | The starting latent is PyTorch's CPU `randn` (MT19937 and the AVX2 Box-Muller over blocks of 16), bit-identical. Ancestral noise is PyTorch's CUDA `randn`, drawn by cuRAND's own device code in torch's launch layout. `dpmpp_2m_sde` uses torchsde's Brownian tree as ComfyUI builds it |

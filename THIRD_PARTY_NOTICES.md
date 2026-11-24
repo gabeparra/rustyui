@@ -43,7 +43,9 @@ with `rustyui:` comments. `backend/src/qgemma3.rs` is a modified copy of candle-
 
 `third_party/candle-flash-attn/kernels/` holds FlashAttention-2 kernels from
 https://github.com/Dao-AILab/flash-attention (Copyright (c) Tri Dao), trimmed and extended with
-split-KV instantiations. CUTLASS (BSD-3-Clause, NVIDIA) is downloaded at build time.
+split-KV instantiations. Building them downloads CUTLASS (BSD-3-Clause, NVIDIA) from
+https://github.com/NVIDIA/cutlass at the commit named in `third_party/candle-flash-attn/build.rs`;
+that copy is not in this repository.
 
 ```
 BSD 3-Clause License
@@ -79,8 +81,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## CUTLASS, cuDNN frontend (BSD-3-Clause, MIT)
 
-`third_party/cutlass` holds the CUTLASS headers at the commit PyTorch 2.11 pins (BSD-3-Clause,
-NVIDIA, `third_party/cutlass/LICENSE.txt`). `third_party/cudnn-frontend` holds NVIDIA's cuDNN
+`third_party/cutlass` holds the CUTLASS headers `backend/kernels/mem_eff.cu` includes, at the commit
+PyTorch 2.11 pins (BSD-3-Clause, NVIDIA, `third_party/cutlass/LICENSE.txt`). It is a second copy,
+separate from the one the FlashAttention build downloads. `third_party/cudnn-frontend` holds NVIDIA's cuDNN
 frontend headers (MIT, `third_party/cudnn-frontend/LICENSE.txt`).
 
 ## comfy_kitchen (Apache-2.0)

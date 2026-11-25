@@ -536,22 +536,26 @@ with guides is next.
 
 ## Performance
 
-Measured on 2026-11-12 on an RTX 4090 (24 GB), rustyui at commit 549179f against ComfyUI 0.39.0 with
-default flags, the same graph, seed and files in both, and the same output from both (all 18 images
+Measured on 2026-11-24 on an RTX 4090 (24 GB), rustyui at commit 7462c3e against ComfyUI 0.39.0 with
+default flags, the same graph, seed and files in both, and the same output from both (all 27 images
 compared, identical to the pixel). Each figure is the median of three runs; "from process start" means
 starting the engine and waiting for the finished file, with the model files already in the page cache.
+The desktop was using the card too (about 5.8 GB and 15 to 20 percent of it), for both engines alike.
 Other hardware and versions will differ.
 
 | SDXL graph | | ComfyUI | rustyui |
 |---|---|---|---|
-| [`lighthouse.png`](docs/examples/lighthouse.png), 1216x832, 30 steps | from process start | 10.6 s | 5.5 s |
-| | warm, new seed | 3.8 s | 3.9 s |
-| two LoRAs, 1024x1792, 30 steps | from process start | 14.5 s | 9.0 s |
-| | warm, new seed | 6.9 s | 7.1 s |
-| [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 20.2 s | 14.0 s |
-| | warm, new seed | 13.6 s | 11.3 s |
+| [`lighthouse.png`](docs/examples/lighthouse.png), 1216x832, 30 steps | from process start | 12.4 s | 5.2 s |
+| | warm, new seed | 4.0 s | 3.5 s |
+| | the 30 sampling steps | 3.5 s | 3.3 s |
+| two LoRAs, 1024x1792, 30 steps | from process start | 16.7 s | 8.4 s |
+| | warm, new seed | 7.1 s | 6.3 s |
+| | the 30 sampling steps | 6.4 s | 5.9 s |
+| [`lighthouse-hires.json`](docs/examples/lighthouse-hires.json), to 1824x1248 | from process start | 20.7 s | 13.1 s |
+| | warm, new seed | 11.3 s | 10.3 s |
+| | the sampling steps of both passes | 7.5 s | 7.0 s |
 
-How quickly each engine lets the card go, measured the same day on the same card against the same
+How quickly each engine lets the card go, measured on 2026-11-12 on the same card against the same
 ComfyUI (median of three runs, every image identical to ComfyUI's). The last column says which rustyui
 build each row comes from: fa472d4 is the code in this repository; 20ab388 is the build just before it,
 which loads and frees the models the same way but paused between small uploads.
@@ -575,11 +579,14 @@ Before these changes rustyui took 0.44 s to get under 1 GiB: it unmapped the che
 copies of each of CLIP-G's fused attention projections. On the two-LoRA graph the UNet with its LoRAs now
 loads in 0.72 s (0.95 s before) and a cold run takes 8.8 s from process start (9.0 s before).
 
-From a cold start rustyui is done in about half to two thirds of ComfyUI's time: the server answers in
-0.2 s against about 5 s, and its GPU kernels come from a compile cache kept in its own cache folder.
-Warm, with the models already loaded, the two are about level (ComfyUI's warm hires runs varied from 11.0
-to 13.9 s, so that row is the least certain); the sampling steps themselves are about 5 percent slower
-in rustyui. When the work stops, rustyui lets the card go: it unloads its models after 90 s without work
+From a cold start rustyui is done in about 40 to 65 percent of ComfyUI's time: the server answers in
+0.2 s against about 6 s, and its GPU kernels come from a compile cache kept in its own cache folder.
+Warm, with the models already loaded, a run takes 87 to 92 percent of ComfyUI's time and the sampling
+steps themselves 93 percent. The matrix products, convolutions and attention are the same kernels in
+both and take the same time; rustyui spends less on the small passes between them (adds, norms, the
+copies between feature maps and tokens), waits less between kernels, and computes each
+cross-attention's projection of the prompt once for a sampler run where ComfyUI computes it at every
+step. When the work stops, rustyui lets the card go: it unloads its models after 90 s without work
 and exits after 120 s with no request, so the card was back to its idle memory 131 s after the last job,
 where ComfyUI keeps its models (7.1 GB here) until it is stopped.
 

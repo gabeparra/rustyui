@@ -6,6 +6,16 @@ All notable changes to rustyui are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- SDXL is faster with the same output: on an RTX 4090 a warm run takes 87 to 92 percent of ComfyUI's
+  time and the sampling steps 93 percent (they took 106 percent before), from faster adds, norms,
+  GEGLU and layout copies, no zero-filling of buffers that are overwritten, and the prompt projected
+  for cross-attention once a sampler run.
+- LTX-2.3: the blocks of the 42 GB DiT that do not fit on a 24 GB card are streamed from page-locked
+  memory one block ahead.
+- `debug-passes` checks the fast kernels bit for bit against the forms they replace.
+
 ### In progress
 
 - LTX-2.3: CFG above 1 together with image guides.

@@ -153,7 +153,18 @@ fn main() -> Result<()> {
             let text = png.texts.iter().find(|(k, _)| k == "prompt").map(|(_, v)| v.clone()).context("no ComfyUI graph (\"prompt\" text) in that PNG")?;
             render(serde_json::from_str(&text)?, out)
         }
-        Some("serve") => server::serve(server::Options {
+        Some("serve") => {
+            // As a container's first process the server would ignore SIGTERM and SIGINT (the kernel
+            // gives PID 1 no default action), and `podman stop` waited out its timeout: end on them.
+            extern "C" fn end(_: libc::c_int) {
+                unsafe { libc::_exit(0) }
+            }
+            let end = end as extern "C" fn(libc::c_int);
+            unsafe {
+                libc::signal(libc::SIGTERM, end as libc::sighandler_t);
+                libc::signal(libc::SIGINT, end as libc::sighandler_t);
+            }
+            server::serve(server::Options {
             listen: arg(&args, "--listen").unwrap_or("127.0.0.1:8190").to_string(),
             out: out.clone(),
             idle: arg(&args, "--idle").unwrap_or("90").parse()?,
@@ -166,7 +177,8 @@ fn main() -> Result<()> {
                 (PathBuf::from(g), tokenizer)
             }),
             no_video: args.iter().any(|a| a == "--no-video"),
-        }),
+            })
+        }
         Some("write") => {
             let usage = "write \"idea\" --model GGUF [--current PROMPT] [--tokenizer FILE]";
             let idea = args.get(2).context(usage)?;

@@ -1,10 +1,10 @@
 //! rustyui-backend: rustyui's server and renderer. It runs ComfyUI API graphs, from ComfyUI
-//! clients and from the editors, in Rust on candle, and serves the editors (ComfyUI's, forked, from
-//! ../ui/dist at /, and rustyui's first from ../frontend/dist at /simple/, compiled in by build.rs).
+//! clients and from its editor, in Rust on candle, and serves that editor at / (from
+//! ../frontend/dist, compiled in by build.rs).
 //!
 //!     rustyui-backend serve [--listen 127.0.0.1:8190] [--idle 90] [--exit-idle S] [--models DIR] [--out DIR] [--frontend DIR]
 //!                           [--prefix NAME] [--mirror HOST:DIR] [--writer GGUF [--writer-tokenizer FILE]] [--no-video]
-//!                                                   the server: ComfyUI's API and the editors
+//!                                                   the server: ComfyUI's API and the editor
 //!     rustyui-backend run graph.json --out DIR      a ComfyUI API graph, once
 //!     rustyui-backend from-png ref.png --out DIR    the graph inside a ComfyUI PNG, rendered again
 //!     rustyui-backend compare a.png b.png           how far apart two renders are, in numbers

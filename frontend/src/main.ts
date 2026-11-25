@@ -1,6 +1,6 @@
 import { createApp } from 'vue'
 
-// /simple/ is the Forge-style editor; /simple/#graph rustyui's first editor, the node graph
+// / is the Forge-style form; /#graph the node-graph editor
 if (location.hash === '#graph') {
   Promise.all([import('@comfyorg/litegraph/style.css'), import('./style.css'), import('./App.vue')]).then(([, , m]) => createApp(m.default).mount('#app'))
 } else {

@@ -11,24 +11,14 @@ Most of the backend follows ComfyUI's code closely, among others: the prompt lan
 the LTX-2.3 model and nodes (`backend/src/ltx*.rs`, `graph_ltx.rs`, from `comfy/ldm/lightricks` and
 `comfy_extras/nodes_lt.py`), Anima (`backend/src/anima*.rs`, `qwen3.rs`) and the Wan 2.1 VAE.
 
-## ComfyUI frontend (GPL-3.0)
+`backend/assets/comfy_object_info.json` holds the node definitions ComfyUI's `/object_info` gives
+(for ComfyUI's own nodes and the node packs' below), which `backend/refs/object_info_ref.py` takes.
+The scripts in `backend/refs/` import ComfyUI from your own copy to capture its results.
+`frontend/src/graph/` follows how ComfyUI's frontend
+(https://github.com/Comfy-Org/ComfyUI_frontend, GPL-3.0) registers nodes and builds the API prompt.
 
-`ui/` is a copy of https://github.com/Comfy-Org/ComfyUI_frontend at v1.55.14, licensed under the
-GNU General Public License v3.0 (`ui/LICENSE`), with its own third-party notices in
-`ui/THIRD_PARTY_NOTICES.md`. `ui/UPSTREAM.md` records the upstream version.
-
-The copy is v1.55.14 with the parts rustyui does not build or serve removed: `apps/` (the
-marketing website and the billing app), `browser_tests/`, upstream's `.github/`, `.claude/`,
-`.agents/`, `.vscode/`, `.storybook/`, `.husky/` and other repository tooling configs (CODEOWNERS,
-CodeRabbit, MCP, Playwright configs), `scripts/cicd`, `scripts/registry-census`,
-`scripts/release-sheriff` and `scripts/skills`, `tools/devtools`, `tools/test-recorder`, a 12 MB
-demo gif of a third-party project, two unit tests that depended on the removed browser tests, and
-the Algolia key in `.env_example`. The workspace entries, root scripts and `pnpm-lock.yaml` were
-updated to match. `ui/LICENSE` and `ui/THIRD_PARTY_NOTICES.md` are kept as upstream has them.
-
-ComfyUI is developed by comfyanonymous and
-contributors and licensed under the GNU General Public License v3.0:
-https://github.com/comfyanonymous/ComfyUI. Its samplers in turn come from k-diffusion by Katherine
+ComfyUI is developed by comfyanonymous and contributors and licensed under the GNU General Public
+License v3.0: https://github.com/comfyanonymous/ComfyUI. Its samplers in turn come from k-diffusion by Katherine
 Crowson (MIT): https://github.com/crowsonkb/k-diffusion
 
 ## candle (MIT OR Apache-2.0)
@@ -295,5 +285,5 @@ on PyAV's FFmpeg libraries (`third_party/ffmpeg-pyav/README.md`).
 ## Other dependencies
 
 The Rust crates rustyui depends on are listed in `Cargo.lock`; all are under permissive licenses
-(MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 or the Unlicense). The simple editor bundles
-Vue (MIT) and @comfyorg/litegraph (MIT); `ui/` lists its own.
+(MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 or the Unlicense). The editor in `frontend/` bundles
+Vue (MIT) and @comfyorg/litegraph (MIT).

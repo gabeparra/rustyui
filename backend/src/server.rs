@@ -1,8 +1,7 @@
 //! `rustyui-backend serve`: rustyui's server, as ComfyUI's is. One process on 127.0.0.1:8190 that
-//! runs the graphs, answers ComfyUI's HTTP API for any ComfyUI client and serves the
-//! editors: ComfyUI's, forked (ui/), at /, and rustyui's first (frontend/: the prompt writer, a
-//! layout for a phone) at /simple/. Both are compiled in; `--frontend DIR` serves a fresh build
-//! of the one at / while working on it.
+//! runs the graphs, answers ComfyUI's HTTP API for any ComfyUI client and serves rustyui's editor
+//! (frontend/: a form with the prompt writer that also lays out on a phone, and a node graph at
+//! /#graph) at /. It is compiled in; `--frontend DIR` serves the files of a folder there instead.
 //!
 //!   POST /prompt          {"prompt": graph, "extra_data": {"extra_pnginfo": {...}}, "client_id"}
 //!                                                    -> {"prompt_id", "number", "node_errors"}
@@ -14,8 +13,8 @@
 //!
 //! Each of those answers under /api/ too, as in ComfyUI, and so do the routes ComfyUI's own
 //! editor uses for its settings, user files and model lists (server_user.rs, server_jobs.rs,
-//! server_files.rs). The first editor's own routes are /rustyui/status and /rustyui/history
-//! (every prompt run here, kept in a file, with the graph it ran); the editor itself is at /.
+//! server_files.rs). rustyui's editor's own routes are /rustyui/status and /rustyui/history
+//! (every prompt run here, kept in a file, with the graph it ran).
 //!
 //! A worker thread runs the graphs in order and keeps models loaded between them. Before a job
 //! it waits for ComfyUI on the same card to be idle and asks it to unload, so the two never hold
@@ -59,16 +58,15 @@ mod jobs;
 #[path = "server_user.rs"]
 mod user_routes;
 
-/// the editors, compiled in (build.rs): EDITOR from ../ui/dist, SIMPLE from ../frontend/dist
+/// the editor, compiled in (build.rs): EDITOR from ../frontend/dist
 mod editor {
     include!(concat!(env!("OUT_DIR"), "/editor.rs"));
-    include!(concat!(env!("OUT_DIR"), "/simple.rs"));
 }
 
-/// what an editor's page says when the backend was built without it
+/// what the editor's page says when the backend was built without it
 const NO_EDITOR: &str = "<!doctype html><meta charset=utf-8><title>rustyui</title>\
-<p>This rustyui-backend was built without this editor. Build it (ui/UPSTREAM.md for the one at /, \
-<code>cd ~/rustyui/frontend &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</code> for the one at /simple/), then build \
+<p>This rustyui-backend was built without its editor. Build it \
+(<code>cd frontend &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</code> in the repository), then build \
 and install the backend again. ComfyUI's API answers here either way.</p>";
 
 /// the editor's history entries kept; the oldest go first (the pictures stay where they are)
@@ -1078,20 +1076,25 @@ fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// A file of an editor ("" is index.html): ComfyUI's, forked, below / (from `--frontend DIR`
-/// when given), and rustyui's first below /simple/; compiled in.
+/// Where an address of the editor's former home goes: it was at /simple/ while another editor
+/// had /. The Location is relative, which also holds behind a proxy's prefix.
+fn moved_editor(path: &str) -> Option<&'static str> {
+    match path {
+        "/simple" => Some("./"),
+        "/simple/" | "/simple/index.html" => Some("../"),
+        _ => None,
+    }
+}
+
+/// A file of the editor ("" is index.html): from `--frontend DIR` when given, else compiled in.
 fn editor_file(dir: Option<&Path>, path: &str) -> Option<(&'static str, Vec<u8>)> {
-    let (files, path, dir) = match path.strip_prefix("/simple") {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => (editor::SIMPLE, rest, None),
-        _ => (editor::EDITOR, path, dir),
-    };
     let rel = match path.trim_start_matches('/') {
         "" => "index.html",
         p => p,
     };
     let body = match dir {
         Some(d) => fs::read(d.join(contained(rel)?)).ok(),
-        None => files.iter().find(|(p, _)| *p == rel).map(|(_, b)| b.to_vec()),
+        None => editor::EDITOR.iter().find(|(p, _)| *p == rel).map(|(_, b)| b.to_vec()),
     };
     match body {
         Some(b) => Some((content_type(rel), b)),
@@ -1527,13 +1530,13 @@ fn handle(srv: &Arc<Server>, mut req: tiny_http::Request) {
             }
         }
 
-        // the simple editor's files are relative to /simple/, so its address without the slash
-        // goes there (a relative Location, which also holds behind a proxy's prefix)
-        ("GET", "/simple") if path == "/simple" => {
-            let to = tiny_http::Header::from_bytes(&b"Location"[..], &b"simple/"[..]).unwrap();
-            let _ = req.respond(tiny_http::Response::empty(308).with_header(to));
+        // old links and bookmarks to the editor go on to / (a browser keeps their #graph)
+        ("GET", _) if moved_editor(&path).is_some() => {
+            let to = moved_editor(&path).unwrap_or("/");
+            let to = tiny_http::Header::from_bytes(&b"Location"[..], to.as_bytes()).unwrap();
+            let _ = req.respond(tiny_http::Response::empty(307).with_header(to));
         }
-        // the editors: anything else a GET asks for is one of their files (a bundle's file names
+        // the editor: anything else a GET asks for is one of its files (a bundle's file names
         // change with its content, so those are kept)
         ("GET", _) => match editor_file(srv.frontend.as_deref(), &path) {
             Some((ctype, body)) if path.contains("/assets/") => reply_cached(req, 200, ctype, body, "private, max-age=31536000, immutable"),
@@ -1783,6 +1786,18 @@ mod tests {
         assert!(String::from_utf8(editor_file(Some(&empty), "/").unwrap().1).unwrap().contains("bun run build"));
         fs::remove_file(dir.parent().unwrap().join(format!("rustyui-secret-{}", std::process::id()))).unwrap();
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_editors_former_address_leads_to_the_root() {
+        // each Location, resolved against the address that sent it, is /
+        assert_eq!(moved_editor("/simple"), Some("./"));
+        for p in ["/simple/", "/simple/index.html"] {
+            assert_eq!(moved_editor(p), Some("../"), "{p}");
+        }
+        for p in ["/", "/index.html", "/simpler", "/simple/assets/index-abc.js", "/api/simple"] {
+            assert_eq!(moved_editor(p), None, "{p}");
+        }
     }
 
     #[test]

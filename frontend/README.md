@@ -1,21 +1,20 @@
-# rustyui simple editor
+# rustyui editor
 
-The editor rustyui serves at **`/simple/`**, beside ComfyUI's own editor at `/`. It is written in
-TypeScript and Vue 3, bundled by Vite into `dist/`, and compiled into the backend binary. It has two
-views:
+The editor rustyui serves at **`/`**. It is written in TypeScript and Vue 3, bundled by Vite into
+`dist/`, and compiled into the backend binary. It has two views:
 
-- **`/simple/`**: a form laid out as Stable Diffusion WebUI Forge lays out its own, for SDXL.
-- **`/simple/#graph`**: a node editor on LiteGraph (`@comfyorg/litegraph`, the canvas ComfyUI's
+- **`/`**: a form laid out as Stable Diffusion WebUI Forge lays out its own, for SDXL.
+- **`/#graph`**: a node editor on LiteGraph (`@comfyorg/litegraph`, the canvas ComfyUI's
   frontend draws with), with a queue, a history with thumbnails and a picture viewer.
 
 Both talk to the backend that serves them and build ComfyUI API graphs, so everything they make
-opens in ComfyUI and in ComfyUI's editor at `/`.
+opens in ComfyUI.
 
 ## Development
 
 ```bash
 bun install --frozen-lockfile            # once, and again when bun.lock changes
-bun run dev       # http://127.0.0.1:5173/simple/ with hot reload; API calls go to the backend on :8190
+bun run dev       # http://127.0.0.1:5173/ with hot reload; API calls go to the backend on :8190
 bun run build     # type-check, then bundle into dist/
 node --experimental-strip-types --test tests/forge.test.ts   # the form's graph and PNG Info tests
 ```
@@ -27,7 +26,7 @@ The dev server listens on 127.0.0.1 only and refuses what the backend refuses (a
 `Host`, a foreign `Origin`, a cross-site `Sec-Fetch-Site`). It drops the browser's `Origin` when it
 passes a request on, since the backend would turn its port away as another origin.
 
-## The form (`/simple/`)
+## The form (`/`)
 
 The checkpoint and clip skip sit on top, then the **txt2img**, **img2img** and **PNG Info** tabs.
 Each tab has the prompt and negative prompt beside **Generate**, the generation settings on the
@@ -69,7 +68,7 @@ backend doesn't have, and from there:
 
 The form's settings are kept in the browser's local storage, per tab.
 
-## The graph view (`/simple/#graph`)
+## The graph view (`/#graph`)
 
 LiteGraph's controls, as in ComfyUI:
 
@@ -98,7 +97,7 @@ LiteGraph's controls, as in ComfyUI:
 - Only what a Save node needs is sent, and it is checked first: nodes the backend does not run
   (shown red), inputs left unconnected and choices the backend does not have are listed, and
   nothing is queued.
-- The queue panel lists every prompt the backend ran, from either editor or from a script, with its
+- The queue panel lists every prompt the backend ran, from either view or from a script, with its
   pictures. **Open graph** puts a prompt's graph back on the canvas, **Forget** takes it off the
   list (the files stay). A picture opens large in the viewer, with its own graph a click away.
 - The canvas is saved in the browser every few seconds, so a reload keeps it.
@@ -139,6 +138,6 @@ workflow format). The form shows each result's settings as A1111-style infotext 
 
 - Only the backend's nodes: the root README lists them. The form builds SDXL graphs only; the graph
   view also plays LTX-2.3 videos from `SaveVideo` in its queue and viewer.
-- The graph view has no undo and no interrupt button (the form and the editor at `/` have one).
+- The graph view has no undo and no interrupt button (the form has the button).
 - Progress is polled (`/rustyui/status`), not taken from the websocket.
-- ComfyUI subgraphs open in the graph view as red nodes; use the editor at `/` for them.
+- ComfyUI subgraphs open in the graph view as red nodes; open those graphs in ComfyUI.

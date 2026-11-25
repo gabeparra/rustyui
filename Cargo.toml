@@ -1,8 +1,9 @@
 # rustyui: what ComfyUI does, in Rust. Two programs, as ComfyUI has them:
 #   backend/   rustyui-backend, the server: loads the models, runs the graphs, answers ComfyUI's
 #              HTTP API on 127.0.0.1:8190 and serves the editor there
-#   frontend/  the node editor that runs in the browser (HTML, CSS, JavaScript; compiled into the
-#              backend, or served live with `rustyui-backend serve --frontend frontend`)
+#   frontend/  the editor that runs in the browser (TypeScript and Vue, built into frontend/dist;
+#              compiled into the backend, or served from the folder with
+#              `rustyui-backend serve --frontend frontend/dist`)
 [workspace]
 members = ["backend"]
 resolver = "2"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// rustyui's simple editor, laid out as Stable Diffusion WebUI Forge lays out its own: the
+// rustyui's form, laid out as Stable Diffusion WebUI Forge lays out its own: the
 // checkpoint above, txt2img / img2img / PNG Info, the prompts beside a big Generate, the
 // generation settings on the left and the gallery with its infotext on the right. Each run is a
 // ComfyUI graph (graph.ts) the backend renders as ComfyUI would.
@@ -436,7 +436,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
 })
 const shown = computed(() => results.value[selected.value])
-/** rustyui's first editor, the node graph, which main.ts opens for #graph */
+/** the node-graph editor, which main.ts opens for #graph */
 function openGraph() {
   location.hash = 'graph'
   location.reload()
@@ -457,8 +457,7 @@ function openGraph() {
       </label>
       <div class="quick-skip"><FSlider label="Clip skip" :min="1" :max="4" :step="1" v-model="cur.clipSkip" /></div>
       <div class="quick-links">
-        <a :href="BASE + '/'" title="ComfyUI's node editor">Node editor</a>
-        <a href="#graph" title="rustyui's first editor" @click.prevent="openGraph">Graph</a>
+        <a href="#graph" title="The node-graph editor" @click.prevent="openGraph">Graph</a>
       </div>
     </header>
 

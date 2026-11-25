@@ -15,7 +15,7 @@ the versions the exactness checks against ComfyUI were made with.
 | Intel IPP ICV | 2026.0.0, static | the build OpenCV 5.0.0 bundles (`third_party/intel-ippicv`) |
 | FFmpeg libraries | 8.1.3, PyAV's build | what ComfyUI encodes video with (`third_party/ffmpeg-pyav`) |
 | Rust | 1.99.0 | `rust-toolchain.toml` pins the same for builds outside the container |
-| Node, pnpm | 22.23.1, 11.13.1 | the editors |
+| Node | 22.23.1 | the editor's tests |
 
 `cuda-12.9.lock` is conda's explicit list (the URL and md5 of each package). A changed pin is a new
 image: `tag.sh` names the image by a hash of `Containerfile` and the lock, and `run.sh` runs the one

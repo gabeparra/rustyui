@@ -32,8 +32,8 @@ const proxied = {
   configure: (proxy: any) => proxy.on('proxyReq', (req: any) => req.removeHeader('origin')),
 }
 
-// served by the backend at /simple/ (ComfyUI's editor, forked in ../ui, is the one at /), or by a
-// reverse proxy below a path of its own: the files are relative to the page so either works
+// served by the backend at /, or by a reverse proxy below a path of its own: the files are
+// relative to the page so either works
 export default defineConfig({
   base: './',
   plugins: [thisBoxOnly, vue()],

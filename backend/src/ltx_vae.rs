@@ -14,7 +14,6 @@
 
 use crate::kernels;
 use anyhow::{bail, Context, Result};
-use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device, Tensor, D};
 use serde_json::Value;
 use std::path::Path;
@@ -61,6 +60,12 @@ fn cat_frames(pieces: Vec<Option<Tensor>>) -> Result<Option<Tensor>> {
     })
 }
 
+/// a + b: whole tensors through the eight-values-a-thread add, a run of frames cut out of a longer
+/// one through candle's, which reads it where it lies
+fn add_frames(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    Ok(if a.is_contiguous() && b.is_contiguous() { crate::kernels::add(a, b)? } else { (a + b)? })
+}
+
 /// add_exchange_cache: the residual add of a block whose output lags its input. The inputs held
 /// from earlier chunks, then the new ones, are added onto the output's frames in order; returns the
 /// output and the inputs not added yet, the next chunk's cache.
@@ -75,7 +80,7 @@ fn add_exchange_cache(dest: Option<Tensor>, cache: Option<Tensor>, input: Option
     if let Some(c) = cache.take() {
         let tc = c.dim(2)?;
         let k = td.min(tc);
-        parts.push((dest.narrow(2, 0, k)? + c.narrow(2, 0, k)?)?);
+        parts.push(add_frames(&dest.narrow(2, 0, k)?, &c.narrow(2, 0, k)?)?);
         cache = frames(&c, k, tc - k)?;
         at = k;
     }
@@ -87,7 +92,7 @@ fn add_exchange_cache(dest: Option<Tensor>, cache: Option<Tensor>, input: Option
         if ti < rest {
             bail!("a residual add with {ti} input frames for {rest} output frames");
         }
-        parts.push((dest.narrow(2, at, rest)? + i.narrow(2, 0, rest)?)?);
+        parts.push(add_frames(&dest.narrow(2, at, rest)?, &i.narrow(2, 0, rest)?)?);
         input = frames(&i, rest, ti - rest)?;
     }
     let out = if parts.len() == 1 { parts.pop().context("no frames")? } else { Tensor::cat(&parts, 2)? };
@@ -147,7 +152,7 @@ struct Conv {
 }
 
 impl Conv {
-    fn load(st: &MmapedSafetensors, dev: &Device, p: &str, ids: &mut Ids) -> Result<Self> {
+    fn load(st: &crate::model::File, dev: &Device, p: &str, ids: &mut Ids) -> Result<Self> {
         let w = st.load(&format!("{p}.weight"), dev)?.to_dtype(DType::BF16)?;
         let (out, _, kt, kh, kw) = w.dims5()?;
         if (kt, kh, kw) != (3, 3, 3) {
@@ -202,7 +207,7 @@ impl Conv {
             return Ok(None);
         }
         let y = kernels::cudnn_conv(&cat, &self.w, &[0, 1, 1], &[1, 1, 1], &[1, 1, 1])?;
-        Ok(Some(y.broadcast_add(&self.b)?))
+        Ok(Some(crate::kernels::add_planes(&y, &self.b, None)?))
     }
 }
 
@@ -215,7 +220,7 @@ struct Res {
 }
 
 impl Res {
-    fn load(st: &MmapedSafetensors, dev: &Device, p: &str, ids: &mut Ids) -> Result<Self> {
+    fn load(st: &crate::model::File, dev: &Device, p: &str, ids: &mut Ids) -> Result<Self> {
         let conv1 = Conv::load(st, dev, &format!("{p}.conv1.conv"), ids)?;
         let conv2 = Conv::load(st, dev, &format!("{p}.conv2.conv"), ids)?;
         ids.res += 1;
@@ -400,11 +405,18 @@ struct Common {
     patch: usize,
 }
 
-fn load_common(st: &MmapedSafetensors, path: &Path, dev: &Device) -> Result<Common> {
+fn load_common(st: &crate::model::File, path: &Path, dev: &Device) -> Result<Common> {
+    // the header alone: reading the whole file for it took a third of a second of every decode
     let header: Value = {
-        let raw = std::fs::read(path)?;
-        let n = u64::from_le_bytes(raw[..8].try_into()?) as usize;
-        serde_json::from_slice(&raw[8..8 + n])?
+        use std::os::unix::fs::FileExt;
+        let f = std::fs::File::open(path)?;
+        let mut n = [0u8; 8];
+        f.read_exact_at(&mut n, 0)?;
+        let n = u64::from_le_bytes(n);
+        anyhow::ensure!(n <= 100_000_000, "{}: a header of {n} bytes", path.display());
+        let mut raw = vec![0u8; n as usize];
+        f.read_exact_at(&mut raw, 8)?;
+        serde_json::from_slice(&raw)?
     };
     let config: Value = serde_json::from_str(header["__metadata__"]["config"].as_str().context("no config in the VAE file")?)?;
     let cfg = if config["vae"].is_object() { config["vae"].clone() } else { config };
@@ -436,7 +448,8 @@ pub struct VideoDecoder {
 
 impl VideoDecoder {
     pub fn load(path: &Path, dev: &Device) -> Result<Self> {
-        let st = unsafe { MmapedSafetensors::new(path) }.with_context(|| format!("open {}", path.display()))?;
+        // read with pread through the page-locked buffer (model::File), not from the mapping
+        let st = crate::model::File::open(path)?;
         let common = load_common(&st, path, dev)?;
         let cfg = &common.cfg;
         if cfg["causal_decoder"].as_bool().unwrap_or(false) {
@@ -543,7 +556,8 @@ pub struct VideoEncoder {
 
 impl VideoEncoder {
     pub fn load(path: &Path, dev: &Device) -> Result<Self> {
-        let st = unsafe { MmapedSafetensors::new(path) }.with_context(|| format!("open {}", path.display()))?;
+        // read with pread through the page-locked buffer (model::File), not from the mapping
+        let st = crate::model::File::open(path)?;
         let common = load_common(&st, path, dev)?;
         let cfg = &common.cfg;
         if cfg["latent_log_var"].as_str().unwrap_or("per_channel") != "uniform" {

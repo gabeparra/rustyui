@@ -155,9 +155,9 @@ pub struct Engine {
     /// the smallest latent (batch x height x width) at which a sampler's resident hook-group
     /// weights ran the card out of memory: from that size on each group's are made per call
     hooks_lean: Option<usize>,
-    /// the smallest video latent (frames x height x width) whose decode ran out of memory beside
-    /// the DiT: from that size on the DiT goes first rather than after a failed attempt
-    ltx_decode_oom: Option<usize>,
+    /// the VRAM each kind of work beside the DiT took the last times it ran (a video decode of a
+    /// size, the text encoder), by its name: Engine::beside_dit lets that much of the DiT go first
+    ltx_room: std::collections::HashMap<String, usize>,
     /// the last prompt's text context (the connectors' output) for a checkpoint: it outlives the
     /// DiT leaving the card, so a new seed does not run the connectors again
     /// the text context last computed: its checkpoint, the projected text it came from (by tensor,
@@ -293,7 +293,7 @@ impl Engine {
             ltx_dit: None,
             anima: None,
             anima_tok: None,
-            ltx_decode_oom: None,
+            ltx_room: Default::default(),
             hooks_lean: None,
 
             ltx_context: vec![],

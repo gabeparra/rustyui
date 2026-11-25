@@ -123,6 +123,29 @@ pub(super) struct DitCache {
 }
 
 /// A CUDA allocation that failed for want of memory
+/// Runs `f` while another thread watches the card's free memory; f's result and the least free
+/// memory seen (None when the watcher could not ask)
+fn with_least_free<R>(f: impl FnOnce() -> R) -> (R, Option<usize>) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (stop, least) = (AtomicBool::new(false), AtomicUsize::new(usize::MAX));
+    let r = std::thread::scope(|s| {
+        s.spawn(|| {
+            let Ok(ctx) = candle_core::cuda_backend::cudarc::driver::CudaContext::new(0) else { return };
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok((free, _)) = ctx.mem_get_info() {
+                    least.fetch_min(free, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        let r = f();
+        stop.store(true, Ordering::Relaxed);
+        r
+    });
+    let least = least.load(Ordering::Relaxed);
+    (r, (least != usize::MAX).then_some(least))
+}
+
 pub(super) fn is_oom(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}");
     s.contains("OUT_OF_MEMORY") || s.contains("out of memory")
@@ -521,13 +544,7 @@ impl Engine {
                     let a = ltx_audio::AudioVae::load(&vae, &dev)?;
                     Ok((a.decode(latent)?, a.out_rate as u32))
                 };
-                let (waveform, sample_rate) = match run() {
-                    Err(e) if is_oom(&e) && self.ltx_dit.is_some() => {
-                        self.ltx_dit = None;
-                        run()?
-                    }
-                    r => r?,
-                };
+                let (waveform, sample_rate) = self.beside_dit(&format!("audio decode {:?}", latent.dims()), run)?;
                 self.dev.synchronize()?;
                 self.timings.push(("decode the audio".into(), t0.elapsed().as_secs_f64()));
                 vec![Val::Audio(Rc::new(AudioVal { waveform, sample_rate }))]
@@ -585,17 +602,27 @@ impl Engine {
     /// CLIPTextEncode with LTXAVTextEncoderLoader's CLIP (Gemma kept loaded for the next prompt)
     pub(super) fn ltx_encode(&mut self, files: &(PathBuf, PathBuf), prompt: &str) -> Result<Val> {
         let key = format!("{}|{}", files.0.display(), files.1.display());
+        // the first prompt after Gemma is opened puts its weights on the card, a second one finds
+        // them there: two different needs beside the DiT
+        let mut first = false;
         if self.ltx_te.as_ref().map(|(k, _, _)| k != &key).unwrap_or(true) {
-            self.free();
+            // everything but the DiT leaves the card; its blocks make room as Gemma needs it
+            (self.vae_dec, self.vae_enc, self.esrgan, self.sam3) = (None, None, None, None);
+            (self.clip, self.unet, self.ltx_te) = (None, None, None);
             let t = Instant::now();
             let g = gemma::Gemma::open(&files.0)?;
             let proj = unsafe { MmapedSafetensors::new(&files.1)? };
             self.timings.push(("load Gemma 3".into(), t.elapsed().as_secs_f64()));
             self.ltx_te = Some((key, g, proj));
+            first = true;
         }
         let t = Instant::now();
-        let (_, g, proj) = self.ltx_te.as_ref().unwrap();
-        let projected = ltx_video::encode_prompt(g, proj, prompt, &self.dev)?;
+        let te = self.ltx_te.take().context("the text encoder")?;
+        let dev = self.dev.clone();
+        let what = if first { "text encoder, first prompt" } else { "text encoder, another prompt" };
+        let projected = self.beside_dit(what, || ltx_video::encode_prompt(&te.1, &te.2, prompt, &dev));
+        self.ltx_te = Some(te);
+        let projected = projected?;
         self.timings.push(("encode prompt".into(), t.elapsed().as_secs_f64()));
         Ok(Val::LtxCond(Rc::new(LtxCond { projected, frame_rate: None, guides: vec![] })))
     }
@@ -612,13 +639,7 @@ impl Engine {
         let t0 = Instant::now();
         let encode =
             || -> Result<Tensor> { ltx_vae::VideoEncoder::load(vae, &dev)?.encode(&ltx_video::start_pixels(&px, iw, ih, lw, lh, &dev)?) };
-        let t = match encode() {
-            Err(e) if is_oom(&e) && self.ltx_dit.is_some() => {
-                self.ltx_dit = None;
-                encode()?
-            }
-            r => r?,
-        };
+        let t = self.beside_dit(&format!("picture encode {lw}x{lh}"), encode)?;
         self.dev.synchronize()?;
         self.timings.push((what.into(), t0.elapsed().as_secs_f64()));
         Ok(t)
@@ -631,24 +652,75 @@ impl Engine {
         (self.clip, self.unet, self.ltx_te) = (None, None, None);
         (self.vae_dec, self.vae_enc, self.esrgan) = (None, None, None);
         let size: usize = video.dims()[2..].iter().product();
-        if self.ltx_decode_oom.is_some_and(|n| size >= n) {
-            self.ltx_dit = None;
-        }
         let t = Instant::now();
         let dev = self.dev.clone();
-        let decode = || -> Result<Tensor> { ltx_vae::VideoDecoder::load(vae, &dev)?.decode(video) };
-        let frames = match decode() {
-            Err(e) if is_oom(&e) && self.ltx_dit.is_some() => {
-                self.ltx_decode_oom = Some(self.ltx_decode_oom.map_or(size, |n| n.min(size)));
-                self.ltx_dit = None;
-                decode()?
-            }
-            r => r?,
+        let loading = std::cell::Cell::new(0.0);
+        let decode = || -> Result<Tensor> {
+            let tl = Instant::now();
+            let decoder = ltx_vae::VideoDecoder::load(vae, &dev)?;
+            dev.synchronize()?;
+            loading.set(tl.elapsed().as_secs_f64());
+            decoder.decode(video)
         };
+        let frames = self.beside_dit(&format!("video decode {size}"), decode)?;
         self.dev.synchronize()?;
         self.vram();
-        self.timings.push(("decode the video".into(), t.elapsed().as_secs_f64()));
-        Ok(Val::Image(frames.permute((0, 3, 1, 2))?.contiguous()?))
+        self.timings.push(("load the video VAE".into(), loading.get()));
+        self.timings.push(("decode the video".into(), t.elapsed().as_secs_f64() - loading.get()));
+        let t = Instant::now();
+        let frames = frames.permute((0, 3, 1, 2))?.contiguous()?;
+        self.dev.synchronize()?;
+        self.timings.push(("the frames as pictures".into(), t.elapsed().as_secs_f64()));
+        Ok(Val::Image(frames))
+    }
+
+    /// Runs `f`, which needs VRAM beside the DiT (a decode, an encode, the text encoder). Every
+    /// run is watched for the memory it took, kept under `what`, and the next run of that kind
+    /// first lets as many of the DiT's blocks go, last first, as free that much; the next sampling
+    /// brings them back. A run that still does not fit lets a few more go and tries again, and
+    /// the DiT itself (its mapping and its other weights) goes only with no block left. Letting
+    /// the whole DiT go for every decode cost its unmapping and all its blocks' uploads each time.
+    fn beside_dit<R>(&mut self, what: &str, f: impl Fn() -> Result<R>) -> Result<R> {
+        // how many blocks go at a time while what `f` takes is not known
+        const STEP: usize = 3;
+        if let (Some(&need), Some(d)) = (self.ltx_room.get(what), self.ltx_dit.as_mut()) {
+            let t = Instant::now();
+            let gone = d.blocks.make_room(need, &self.dev)?;
+            if gone > 0 {
+                self.timings.push((format!("{gone} of the DiT's blocks off the card"), t.elapsed().as_secs_f64()));
+            }
+        }
+        loop {
+            self.dev.synchronize()?;
+            let before = self.free_vram()?;
+            let (r, least) = with_least_free(&f);
+            match r {
+                Err(e) if is_oom(&e) && self.ltx_dit.is_some() => {
+                    let t = Instant::now();
+                    let gone = self.ltx_dit.as_mut().unwrap().blocks.release(STEP, &self.dev)?;
+                    if gone == 0 {
+                        self.ltx_dit = None;
+                        self.timings.push(("the DiT off the card".into(), t.elapsed().as_secs_f64()));
+                    } else {
+                        self.timings.push((
+                            format!("{gone} of the DiT's blocks off the card after {what} ran out of memory"),
+                            t.elapsed().as_secs_f64(),
+                        ));
+                    }
+                }
+                r => {
+                    let r = r?;
+                    if let Some(least) = least {
+                        // what it took, an eighth over, and 256 MiB for what else moves on the card
+                        let took = before.saturating_sub(least);
+                        let need = took + took / 8 + (256 << 20);
+                        let known = self.ltx_room.entry(what.to_string()).or_insert(0);
+                        *known = (*known).max(need);
+                    }
+                    return Ok(r);
+                }
+            }
+        }
     }
 
     fn sampler_custom_advanced(&mut self, inp: &serde_json::Map<String, Value>) -> Result<Vec<Val>> {

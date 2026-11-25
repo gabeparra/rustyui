@@ -31,14 +31,20 @@ fn raw_u8(st: &MmapedSafetensors, name: &str, dev: &Device) -> Result<Tensor> {
 pub struct HostBlocks {
     key: String,
     blocks: Vec<usize>,
-    buf: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u8>,
-    base: usize,
-    /// offset, length and, for a tensor kept in another dtype than the file's, that dtype
+    /// one page-locked buffer for each copy made: the blocks streamed at first, then any block
+    /// that came to be streamed later (a graph that leaves room for one block fewer on the card)
+    parts: Vec<HostPart>,
+    /// address, length and, for a tensor kept in another dtype than the file's, that dtype
     /// (U8: as in the file)
     at: std::collections::HashMap<String, (usize, usize, DType)>,
 }
 
-impl Drop for HostBlocks {
+struct HostPart {
+    buf: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u8>,
+    base: usize,
+}
+
+impl Drop for HostPart {
     fn drop(&mut self) {
         kernels::unmark_pinned(self.base, self.base + self.buf.len());
     }
@@ -55,8 +61,8 @@ fn host_copy(name: &str) -> Option<(&'static [u8], Option<DType>)> {
     HOST_BLOCKS.with(|h| {
         let h = h.borrow();
         let hb = h.as_ref()?;
-        let &(off, len, dt) = hb.at.get(name)?;
-        Some((unsafe { std::slice::from_raw_parts((hb.base + off) as *const u8, len) }, (dt != DType::U8).then_some(dt)))
+        let &(addr, len, dt) = hb.at.get(name)?;
+        Some((unsafe { std::slice::from_raw_parts(addr as *const u8, len) }, (dt != DType::U8).then_some(dt)))
     })
 }
 
@@ -78,12 +84,16 @@ fn mem_available() -> usize {
 }
 
 /// Makes the host copy of blocks `list` of the DiT `key` unless it is there: only with 16 GB of
-/// RAM to spare beside it (RUSTYUI_NO_PIN=1 never)
+/// RAM to spare beside it (RUSTYUI_NO_PIN=1 never). A copy of this DiT that lacks some of them
+/// (one block more is streamed than before) gets those added; copying all of them again took 7 s.
 fn ensure_host_blocks(key: &str, st: &MmapedSafetensors, list: &[usize], dev: &Device) -> Result<()> {
-    if HOST_BLOCKS.with(|h| h.borrow().as_ref().is_some_and(|hb| hb.key == key && list.iter().all(|k| hb.blocks.contains(k)))) {
-        return Ok(());
+    let same = HOST_BLOCKS.with(|h| h.borrow().as_ref().is_some_and(|hb| hb.key == key));
+    if !same {
+        drop_host_blocks();
     }
-    drop_host_blocks();
+    let list: Vec<usize> =
+        HOST_BLOCKS.with(|h| list.iter().copied().filter(|k| !h.borrow().as_ref().is_some_and(|hb| hb.blocks.contains(k))).collect());
+    let list = &list[..];
     if std::env::var_os("RUSTYUI_NO_PIN").is_some() || list.is_empty() {
         return Ok(());
     }
@@ -125,7 +135,7 @@ fn ensure_host_blocks(key: &str, st: &MmapedSafetensors, list: &[usize], dev: &D
         let (dst, tail) = rest.split_at_mut(*len);
         rest = tail;
         jobs.push((st.get(n)?.data(), dst, *table));
-        at.insert(n.clone(), (off, *len, if *table { DType::BF16 } else { DType::U8 }));
+        at.insert(n.clone(), (base + off, *len, if *table { DType::BF16 } else { DType::U8 }));
         off += len;
     }
     // eight threads take the mapped file's page faults side by side
@@ -147,7 +157,13 @@ fn ensure_host_blocks(key: &str, st: &MmapedSafetensors, list: &[usize], dev: &D
         }
     });
     kernels::mark_pinned(base, base + total);
-    HOST_BLOCKS.with(|h| *h.borrow_mut() = Some(HostBlocks { key: key.to_string(), blocks: list.to_vec(), buf, base, at }));
+    HOST_BLOCKS.with(|h| {
+        let mut h = h.borrow_mut();
+        let hb = h.get_or_insert_with(|| HostBlocks { key: key.to_string(), blocks: vec![], parts: vec![], at: Default::default() });
+        hb.blocks.extend_from_slice(list);
+        hb.parts.push(HostPart { buf, base });
+        hb.at.extend(at);
+    });
     eprintln!(
         "[ltx] {} streamed blocks copied to page-locked RAM ({:.1} GB, {tables} scale-shift tables as bf16) in {:.1}s",
         list.len(),
@@ -1343,6 +1359,31 @@ impl BlockCache {
     pub fn fit_with(&mut self, tokens: usize, extra: usize, dev: &Device) -> Result<()> {
         self.reserve = Self::for_tokens(tokens).reserve;
         self.evict_to(self.reserve + extra, dev)
+    }
+
+    /// Lets resident blocks go, last first, until `bytes` of VRAM are free: room for something
+    /// that runs beside the DiT between two samplings (the video decode). Returns how many went;
+    /// the next `preload` brings them back.
+    pub fn make_room(&mut self, bytes: usize, dev: &Device) -> Result<usize> {
+        let before = self.resident();
+        self.evict_to(bytes, dev)?;
+        Ok(before - self.resident())
+    }
+
+    /// Lets the last `n` resident blocks go; returns how many went (0 with none resident)
+    pub fn release(&mut self, n: usize, dev: &Device) -> Result<usize> {
+        kernels::wait_uploads()?;
+        self.next = None;
+        let mut gone = 0;
+        while gone < n {
+            match self.resident.iter().rposition(|b| b.is_some()) {
+                Some(i) => self.resident[i] = None,
+                None => break,
+            }
+            gone += 1;
+        }
+        dev.synchronize()?;
+        Ok(gone)
     }
 
     fn evict_to(&mut self, free_wanted: usize, dev: &Device) -> Result<()> {

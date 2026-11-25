@@ -1512,6 +1512,12 @@ struct CfgDenoiser<'a> {
     last_uncond: Option<Tensor>,
     /// TiledAttentionCouple's patch on the model
     couple: Option<Rc<crate::unet::Couple>>,
+    /// the batched call's context and adm for a batch of b latents, made once: the same tensors
+    /// at every step, which is what lets `_kv` keep the cross-attentions' keys and values
+    cat: Option<(usize, Tensor, Tensor)>,
+    /// the same for the calls that do not batch: each side's context and adm repeated to b
+    rep: Option<(usize, Vec<Tensor>, Vec<Tensor>)>,
+    _kv: crate::unet::KvCache,
 }
 
 /// sampling_function's cfg 1 optimization: at a cfg math.isclose to 1 ComfyUI passes no negative to
@@ -1574,6 +1580,9 @@ impl<'a> CfgDenoiser<'a> {
             dev,
             last_uncond: None,
             couple: None,
+            cat: None,
+            rep: None,
+            _kv: crate::unet::KvCache::begin(),
         })
     }
 
@@ -1602,14 +1611,37 @@ impl Denoise for CfgDenoiser<'_> {
         // a batch of b latents: each conditioning repeated to b (comfy.utils.repeat_to_batch_size),
         // cond's b then uncond's b in one call when they batch
         let b = x.dim(0)?;
-        let (ctx, y) = if b == 1 {
-            (self.ctx.clone(), self.y.clone())
-        } else {
-            (
-                self.ctx.iter().map(|c| c.repeat((b, 1, 1))).collect::<candle_core::Result<Vec<_>>>()?,
-                self.y.iter().map(|y| y.repeat((b, 1))).collect::<candle_core::Result<Vec<_>>>()?,
-            )
-        };
+        if self.batched && !self.skip_uncond {
+            if self.cat.as_ref().is_none_or(|c| c.0 != b) {
+                let rep = |t: &Tensor, dims: &[usize]| if b == 1 { Ok(t.clone()) } else { t.repeat(dims) };
+                // _calc_cond_batch reverses its list, so the batch is uncond's b, then cond's b
+                let ctx = Tensor::cat(&[&rep(&self.ctx[1], &[b, 1, 1])?, &rep(&self.ctx[0], &[b, 1, 1])?], 0)?;
+                let y = Tensor::cat(&[&rep(&self.y[1], &[b, 1])?, &rep(&self.y[0], &[b, 1])?], 0)?;
+                self.cat = Some((b, ctx, y));
+            }
+            let (_, ctx, y) = self.cat.as_ref().unwrap();
+            let xb = Tensor::cat(&[&xc, &xc], 0)?;
+            let out = self.call(&xb, &vec![t; 2 * b], ctx, y, &[1, 0])?;
+            let (cond_out, uncond_out) = (out.narrow(0, b, b)?, out.narrow(0, 0, b)?);
+            let cond = (x - cond_out.broadcast_mul(&sig)?)?;
+            let uncond = (x - uncond_out.broadcast_mul(&sig)?)?;
+            let cfg = Tensor::new(self.cfg, self.dev)?;
+            let out = (&uncond + (&cond - &uncond)?.broadcast_mul(&cfg)?)?;
+            self.last_uncond = Some(uncond);
+            return Ok(out);
+        }
+        if self.rep.as_ref().is_none_or(|r| r.0 != b) {
+            self.rep = Some(if b == 1 {
+                (b, self.ctx.clone(), self.y.clone())
+            } else {
+                (
+                    b,
+                    self.ctx.iter().map(|c| c.repeat((b, 1, 1))).collect::<candle_core::Result<Vec<_>>>()?,
+                    self.y.iter().map(|y| y.repeat((b, 1))).collect::<candle_core::Result<Vec<_>>>()?,
+                )
+            });
+        }
+        let (_, ctx, y) = self.rep.as_ref().unwrap();
         if self.skip_uncond {
             let cond_out = self.call(&xc, &vec![t; b], &ctx[0], &y[0], &[0])?;
             let cond = (x - cond_out.broadcast_mul(&sig)?)?;
@@ -1619,16 +1651,8 @@ impl Denoise for CfgDenoiser<'_> {
             self.last_uncond = Some(uncond);
             return Ok(out);
         }
-        let (cond_out, uncond_out) = if self.batched {
-            // _calc_cond_batch reverses its list, so the batch is uncond's b, then cond's b
-            let xb = Tensor::cat(&[&xc, &xc], 0)?;
-            let ctx = Tensor::cat(&[&ctx[1], &ctx[0]], 0)?;
-            let y = Tensor::cat(&[&y[1], &y[0]], 0)?;
-            let out = self.call(&xb, &vec![t; 2 * b], &ctx, &y, &[1, 0])?;
-            (out.narrow(0, b, b)?, out.narrow(0, 0, b)?)
-        } else {
-            (self.call(&xc, &vec![t; b], &ctx[0], &y[0], &[0])?, self.call(&xc, &vec![t; b], &ctx[1], &y[1], &[1])?)
-        };
+        let (cond_out, uncond_out) =
+            (self.call(&xc, &vec![t; b], &ctx[0], &y[0], &[0])?, self.call(&xc, &vec![t; b], &ctx[1], &y[1], &[1])?);
         let cond = (x - cond_out.broadcast_mul(&sig)?)?;
         let uncond = (x - uncond_out.broadcast_mul(&sig)?)?;
         let cfg = Tensor::new(self.cfg, self.dev)?;

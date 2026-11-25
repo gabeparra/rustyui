@@ -37,9 +37,54 @@ struct Attn {
     heads: usize,
 }
 
+thread_local! {
+    /// to_k and to_v of the prompt's context, by (weight, context) tensor: while a `KvCache` lives
+    static KV: std::cell::RefCell<Option<std::collections::HashMap<(candle_core::TensorId, candle_core::TensorId), Tensor>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While one of these lives (a sampler holds it for its run), a cross-attention's to_k and to_v
+/// are computed once for each context tensor and kept: the context and the weights are the same
+/// at every step, so the same call would give the same values again. ComfyUI computes them at
+/// every step. The caller must pass the same context tensor (not an equal copy) at every step.
+pub struct KvCache(());
+
+impl KvCache {
+    pub fn begin() -> Self {
+        KV.with(|c| *c.borrow_mut() = Some(Default::default()));
+        KvCache(())
+    }
+}
+
+impl Drop for KvCache {
+    fn drop(&mut self) {
+        KV.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+fn project_ctx(l: &Linear, ctx: &Tensor) -> Result<Tensor> {
+    let key = (l.w.id(), ctx.id());
+    if let Some(t) = KV.with(|c| c.borrow().as_ref().and_then(|m| m.get(&key).cloned())) {
+        return Ok(t);
+    }
+    let t = l.forward(ctx)?;
+    KV.with(|c| {
+        if let Some(m) = c.borrow_mut().as_mut() {
+            m.insert(key, t.clone());
+        }
+    });
+    Ok(t)
+}
+
 impl Attn {
     fn forward(&self, x: &Tensor, ctx: &Tensor) -> Result<Tensor> {
         let a = attention(&self.q.forward(x)?, &self.k.forward(ctx)?, &self.v.forward(ctx)?, self.heads, None)?;
+        Ok(self.out.forward(&a)?)
+    }
+
+    /// forward on the prompt's context, whose to_k and to_v a `KvCache` keeps between steps
+    fn forward_cross(&self, x: &Tensor, ctx: &Tensor) -> Result<Tensor> {
+        let a = attention(&self.q.forward(x)?, &project_ctx(&self.k, ctx)?, &project_ctx(&self.v, ctx)?, self.heads, None)?;
         Ok(self.out.forward(&a)?)
     }
 
@@ -165,7 +210,7 @@ impl Block {
         let n = self.norm2.forward(&x)?;
         let a2 = match couple {
             Some((cc, latent)) => self.attn2.forward_couple(&n, cc, latent)?,
-            None => self.attn2.forward(&n, ctx)?,
+            None => self.attn2.forward_cross(&n, ctx)?,
         };
         let x = (a2 + &x)?;
         // GEGLU: value * gelu(gate), the projection's two halves

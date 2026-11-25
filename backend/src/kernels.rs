@@ -572,7 +572,8 @@ fn gemm_ex_linear(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tenso
             // a fresh buffer: cuBLAS writes the result over it
             b.reshape((1, n))?.repeat((rows, 1))?.flatten_all()?.contiguous()?.copy()?
         }
-        None => Tensor::zeros(rows * n, dt, x.device())?,
+        // beta is 0 without a bias: cuBLAS writes every value and reads none, so no zero fill
+        None => unsafe { Tensor::empty(rows * n, dt, x.device())? },
     };
     {
         let (xst, xl) = x.storage_and_layout();
@@ -2906,7 +2907,8 @@ pub fn torch_mm(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let d = cuda_dev(a)?;
     let stream = d.cuda_stream();
     let (a, b) = (a.contiguous()?, b.contiguous()?);
-    let out = Tensor::zeros((m, n), dt, a.device())?;
+    // beta 0: cuBLAS writes every value of C and reads none
+    let out = unsafe { Tensor::empty((m, n), dt, a.device())? };
     {
         let (ast, al) = a.storage_and_layout();
         let (bst, bl) = b.storage_and_layout();
@@ -3241,7 +3243,8 @@ pub fn torch_bgemm_f32(
     }
     let d = cuda_dev(a)?;
     let stream = d.cuda_stream();
-    let out = Tensor::zeros(c_len, DType::F32, a.device())?;
+    // beta 0: cuBLAS writes every value of C and reads none
+    let out = unsafe { Tensor::empty(c_len, DType::F32, a.device())? };
     {
         let (ast, al) = a.storage_and_layout();
         let (bst, bl) = b.storage_and_layout();
@@ -3626,7 +3629,8 @@ pub fn torch_bgemm_bf16(
             }
             c.flatten_all()?.contiguous()?.copy()?
         }
-        None => Tensor::zeros(c_len, DType::BF16, a.device())?,
+        // beta 0 without a C: cuBLAS writes every value and reads none
+        None => unsafe { Tensor::empty(c_len, DType::BF16, a.device())? },
     };
     let (a, b) = (a.contiguous()?, b.contiguous()?);
     {

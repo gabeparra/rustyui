@@ -142,7 +142,9 @@ impl FlashAttn {
 
         let elem_count = out_shape.elem_count();
         let mut dst = unsafe { dev.alloc::<T>(elem_count)? };
-        let mut softmax_lse = dev.alloc_zeros::<f32>(b_sz * num_heads * seqlen_q)?;
+        // not zeroed: the kernel writes every value it or the caller reads (torch's mha_fwd takes
+        // torch::empty for these three)
+        let mut softmax_lse = unsafe { dev.alloc::<f32>(b_sz * num_heads * seqlen_q)? };
 
         // torch's mha_fwd splits the keys when the query blocks alone would leave SMs idle
         // (set_params_splitkv), so the same split is taken here for the same rounding.
@@ -157,8 +159,8 @@ impl FlashAttn {
             seqlen_k.div_ceil(block_n),
             128,
         );
-        let mut lse_accum = dev.alloc_zeros::<f32>(if num_splits > 1 { num_splits * b_sz * num_heads * seqlen_q } else { 1 })?;
-        let mut out_accum = dev.alloc_zeros::<f32>(if num_splits > 1 { num_splits * b_sz * num_heads * seqlen_q * head_size_rounded } else { 1 })?;
+        let mut lse_accum = unsafe { dev.alloc::<f32>(if num_splits > 1 { num_splits * b_sz * num_heads * seqlen_q } else { 1 })? };
+        let mut out_accum = unsafe { dev.alloc::<f32>(if num_splits > 1 { num_splits * b_sz * num_heads * seqlen_q * head_size_rounded } else { 1 })? };
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 
@@ -754,7 +756,7 @@ impl FlashAttnVarLen {
 
         let elem_count = out_shape.elem_count();
         let mut dst = unsafe { dev.alloc::<T>(elem_count)? };
-        let mut softmax_lse = dev.alloc_zeros::<f32>(num_heads * total_q)?;
+        let mut softmax_lse = unsafe { dev.alloc::<f32>(num_heads * total_q)? };
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 

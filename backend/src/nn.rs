@@ -147,7 +147,17 @@ impl Conv2d {
         self.conv(x, false)
     }
 
+    /// forward, then + e, a value for each (n, channel) as (N, C, 1, 1): the bias and e are added
+    /// in one pass over the convolution's output, each sum rounded as its own add would round it
+    pub fn forward_plus(&self, x: &Tensor, e: &Tensor) -> Result<Tensor> {
+        crate::profile::time("conv2d", x.device(), || self.conv_plus(x, false, Some(e)))
+    }
+
     fn conv(&self, x: &Tensor, nhwc: bool) -> Result<Tensor> {
+        self.conv_plus(x, nhwc, None)
+    }
+
+    fn conv_plus(&self, x: &Tensor, nhwc: bool, e: Option<&Tensor>) -> Result<Tensor> {
         // torch's cuDNN convolution, the plan chosen as torch chooses it (kernels::cudnn_conv)
         let cout = self.w.dim(0)?;
         let (p, s) = (self.padding, self.stride);
@@ -156,9 +166,10 @@ impl Conv2d {
         } else {
             crate::kernels::cudnn_conv(x, &self.w, &[p, p], &[s, s], &[1, 1])?
         };
-        match &self.b {
-            Some(b) => y.broadcast_add(&b.reshape((1, cout, 1, 1))?),
-            None => Ok(y),
+        match (&self.b, e) {
+            (Some(b), e) => crate::kernels::add_planes(&y, &b.reshape((1, cout, 1, 1))?, e),
+            (None, Some(e)) => crate::kernels::add_planes(&y, e, None),
+            (None, None) => Ok(y),
         }
     }
 }

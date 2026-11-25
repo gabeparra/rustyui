@@ -18,6 +18,16 @@ template <> __device__ __forceinline__ float from_f<float>(float v) { return v; 
 template <> __device__ __forceinline__ __half from_f<__half>(float v) { return __float2half_rn(v); }
 template <> __device__ __forceinline__ __nv_bfloat16 from_f<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
 
+// Four values moved by one aligned load or store, as torch's vectorized elementwise kernels move
+// them (MemoryAccess.cuh's aligned_vector). Only how the values travel changes: each value's own
+// arithmetic stays what the one-value-a-thread form computes.
+template <typename T> struct alignas(4 * sizeof(T)) Vec4 {
+    T v[4];
+};
+template <typename T> __device__ __forceinline__ bool vec_aligned(const T *p) { return ((uintptr_t)p % (4 * sizeof(T))) == 0; }
+template <typename T> __device__ __forceinline__ Vec4<T> vload(const T *p) { return *reinterpret_cast<const Vec4<T> *>(p); }
+template <typename T> __device__ __forceinline__ void vstore(T *p, const Vec4<T> &v) { *reinterpret_cast<Vec4<T> *>(p) = v; }
+
 __device__ __forceinline__ float warp_sum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffff, v, o);
     return v;
@@ -94,10 +104,8 @@ __device__ __forceinline__ Welford welford_warp(Welford v) {
 // fused multiply-add: checked on SDXL's fp16 GroupNorms, where an FMA there moves a few hundred
 // values); y = a * x + b, fused, rounded. silu != 0 also applies SiLU to the
 // rounded result, as the separate PyTorch kernel would.
-template <typename T>
-__device__ void group_norm(const T *x, T *y, const T *gamma, const T *beta, int C, long HW, int G, float eps, int silu) {
+template <typename T> __device__ __forceinline__ void group_norm_moments(const T *x, float *stats, int C, long HW, int G, float eps) {
     __shared__ Welford shared[32];
-    __shared__ float stats[2];
     const int row = blockIdx.x, n = row / G, g = row % G, cpg = C / G;
     const long base = ((long)n * C + (long)g * cpg) * HW;
     const long len = (long)cpg * HW;
@@ -121,29 +129,104 @@ __device__ void group_norm(const T *x, T *y, const T *gamma, const T *beta, int 
         stats[0] = to_f<T>(from_f<T>(val.mean));
         stats[1] = to_f<T>(from_f<T>(rsqrtf(var + to_f<T>(from_f<T>(eps)))));
     }
+}
+
+// one value of the affine pass: a and b as ComputeFusedParamsCUDAKernel makes them, y = a * x + b
+template <typename T>
+__device__ __forceinline__ T group_norm_value(T x, float mean, float rstd, float gamma, float beta, int silu) {
+    const float a = rstd * gamma;
+    const float b = __fadd_rn(__fmul_rn(-a, mean), beta);
+    float v = fmaf(a, to_f<T>(x), b);
+    if (silu) v = silu_rounded<T>(v);
+    return from_f<T>(v);
+}
+
+template <typename T>
+__device__ void group_norm(const T *x, T *y, const T *gamma, const T *beta, int C, long HW, int G, float eps, int silu) {
+    __shared__ float stats[2];
+    group_norm_moments<T>(x, stats, C, HW, G, eps);
     __syncthreads();
+    const int row = blockIdx.x, n = row / G, g = row % G, cpg = C / G;
+    const long base = ((long)n * C + (long)g * cpg) * HW;
+    const long len = (long)cpg * HW;
     const float mean = stats[0], rstd = stats[1];
-    for (long i = tid; i < len; i += blockDim.x) {
+    for (long i = threadIdx.x; i < len; i += blockDim.x) {
         const int c = g * cpg + (int)(i / HW);
-        const float a = rstd * to_f<T>(gamma[c]);
-        const float b = __fadd_rn(__fmul_rn(-a, mean), to_f<T>(beta[c]));
-        float v = fmaf(a, to_f<T>(x[base + i]), b);
-        if (silu) v = silu_rounded<T>(v);
-        y[base + i] = from_f<T>(v);
+        y[base + i] = group_norm_value<T>(x[base + i], mean, rstd, to_f<T>(gamma[c]), to_f<T>(beta[c]), silu);
     }
+}
+
+// The same GroupNorm as two kernels, as torch runs it: the statistics with RowwiseMomentsCUDAKernel's
+// launch (a block per (n, group), which leaves most of the card idle), written to stats as
+// (mean, rstd) pairs, then the affine pass over every value with the whole card: a block row per
+// (n, channel) plane, eight values a thread.
+template <typename T> __device__ void group_norm_stats(const T *x, float *stats, int C, long HW, int G, float eps) {
+    __shared__ float st[2];
+    group_norm_moments<T>(x, st, C, HW, G, eps);
+    if (threadIdx.x == 0) {
+        stats[2 * blockIdx.x] = st[0];
+        stats[2 * blockIdx.x + 1] = st[1];
+    }
+}
+
+template <typename T>
+__device__ void group_norm_apply(const T *x, T *y, const T *gamma, const T *beta, const float *stats, int C, int HW, int G, int silu) {
+    const int p = blockIdx.y, c = p % C, row = (p / C) * G + c / (C / G);
+    const float mean = stats[2 * row], rstd = stats[2 * row + 1];
+    const float ga = to_f<T>(gamma[c]), be = to_f<T>(beta[c]);
+    const T *xp = x + (long)p * HW;
+    T *yp = y + (long)p * HW;
+    const int i0 = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    if (i0 >= HW) return;
+    if (i0 + 8 <= HW && vec_aligned<T>(xp) && vec_aligned<T>(yp)) {
+#pragma unroll
+        for (int k = 0; k < 8; k += 4) {
+            const Vec4<T> v = vload(xp + i0 + k);
+            Vec4<T> o;
+#pragma unroll
+            for (int j = 0; j < 4; j++) o.v[j] = group_norm_value<T>(v.v[j], mean, rstd, ga, be, silu);
+            vstore(yp + i0 + k, o);
+        }
+        return;
+    }
+    for (int i = i0; i < i0 + 8 && i < HW; i++) yp[i] = group_norm_value<T>(xp[i], mean, rstd, ga, be, silu);
 }
 
 // GEGLU: h = [value | gate] on the last dim -> value * gelu(gate), exact (erf) GELU,
 // each step rounded to T as PyTorch's separate gelu and mul kernels round.
+template <typename T> __device__ __forceinline__ T geglu_value(T value, T gate) {
+    const float a = to_f<T>(value);
+    const float g = to_f<T>(gate);
+    const float ge = to_f<T>(from_f<T>(g * 0.5f * (1.0f + erff(g * (float)M_SQRT1_2))));
+    return from_f<T>(a * ge);
+}
+
 template <typename T>
 __device__ void geglu(const T *h, T *y, long rows, int half) {
     const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= rows * half) return;
     const long r = i / half, c = i % half;
-    const float a = to_f<T>(h[r * 2 * half + c]);
-    const float g = to_f<T>(h[r * 2 * half + half + c]);
-    const float ge = to_f<T>(from_f<T>(g * 0.5f * (1.0f + erff(g * (float)M_SQRT1_2))));
-    y[i] = from_f<T>(a * ge);
+    y[i] = geglu_value<T>(h[r * 2 * half + c], h[r * 2 * half + half + c]);
+}
+
+// the same with eight values of one row a thread (half a multiple of 8, h and y aligned): one
+// division for the eight, the values and gates read and the results written four at a time
+template <typename T>
+__device__ void geglu8(const T *h, T *y, long rows, int half) {
+    const unsigned t = blockIdx.x * blockDim.x + threadIdx.x, per = half / 8;
+    const unsigned r = t / per, c = (t - r * per) * 8;
+    if (r >= rows) return;
+    const T *hv = h + (long)r * 2 * half + c;
+    const T *hg = hv + half;
+    T *yo = y + (long)r * half + c;
+#pragma unroll
+    for (int k = 0; k < 8; k += 4) {
+        const Vec4<T> a = vload(hv + k), g = vload(hg + k);
+        Vec4<T> o;
+#pragma unroll
+        for (int j = 0; j < 4; j++) o.v[j] = geglu_value<T>(a.v[j], g.v[j]);
+        vstore(yo + k, o);
+    }
 }
 
 #define INSTANTIATE(T, SUFFIX)                                                                          \
@@ -153,6 +236,18 @@ __device__ void geglu(const T *h, T *y, long rows, int half) {
     }                                                                                                    \
     extern "C" __global__ void geglu_##SUFFIX(const T *h, T *y, long rows, int half) {                  \
         geglu<T>(h, y, rows, half);                                                                      \
+    }                                                                                                    \
+    extern "C" __global__ void geglu8_##SUFFIX(const T *h, T *y, long rows, int half) {                 \
+        geglu8<T>(h, y, rows, half);                                                                     \
+    }                                                                                                    \
+    extern "C" __global__ void group_norm_stats_##SUFFIX(const T *x, float *stats, int C, long HW,      \
+                                                         int G, float eps) {                             \
+        group_norm_stats<T>(x, stats, C, HW, G, eps);                                                    \
+    }                                                                                                    \
+    extern "C" __global__ void group_norm_apply_##SUFFIX(const T *x, T *y, const T *gamma,              \
+                                                         const T *beta, const float *stats, int C,       \
+                                                         int HW, int G, int silu) {                      \
+        group_norm_apply<T>(x, y, gamma, beta, stats, C, HW, G, silu);                                   \
     }
 
 INSTANTIATE(__half, f16)
@@ -1093,10 +1188,19 @@ __device__ void torch_layer_norm(const T *x, const T *w, const T *b, T *y, int N
     const int numx = blockDim.x * blockDim.y;
     const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
     const int nvec = N / 4;
+    // the four values of a step by one aligned load, as torch reads them, when the rows allow it
+    const bool vec = vec_aligned<T>(row) && vec_aligned<T>(out) && vec_aligned<T>(w) && vec_aligned<T>(b);
     WelfordLN wd{0.f, 0.f, 0.f};
     for (int i = thrx; i < nvec; i += numx) {
+        Vec4<T> v;
+        if (vec) {
+            v = vload(row + i * 4);
+        } else {
 #pragma unroll
-        for (int ii = 0; ii < 4; ii++) wd = welford_online(to_f<T>(row[i * 4 + ii]), wd);
+            for (int ii = 0; ii < 4; ii++) v.v[ii] = row[i * 4 + ii];
+        }
+#pragma unroll
+        for (int ii = 0; ii < 4; ii++) wd = welford_online(to_f<T>(v.v[ii]), wd);
     }
     for (int offset = 16; offset > 0; offset >>= 1) {
         WelfordLN wdB{__shfl_down_sync(0xffffffff, wd.mean, offset), __shfl_down_sync(0xffffffff, wd.sigma2, offset),
@@ -1127,6 +1231,14 @@ __device__ void torch_layer_norm(const T *x, const T *w, const T *b, T *y, int N
     const float mean = meansigmabuf[0];
     const float rstd = rsqrtf(meansigmabuf[1] + eps);
     for (int i = thrx; i < nvec; i += numx) {
+        if (vec) {
+            const Vec4<T> xv = vload(row + i * 4), wv = vload(w + i * 4), bv = vload(b + i * 4);
+            Vec4<T> o;
+#pragma unroll
+            for (int ii = 0; ii < 4; ii++) o.v[ii] = from_f<T>(to_f<T>(wv.v[ii]) * (rstd * (to_f<T>(xv.v[ii]) - mean)) + to_f<T>(bv.v[ii]));
+            vstore(out + i * 4, o);
+            continue;
+        }
 #pragma unroll
         for (int ii = 0; ii < 4; ii++) {
             const int j = i * 4 + ii;
@@ -1526,3 +1638,126 @@ extern "C" __global__ void sam3_refine_f32(const float *ref, const __nv_bfloat16
     }
     out[i] = __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-s)));
 }
+
+// ── whole-tensor passes, eight values a thread ───────────────────────────────────────────────────
+// a + b of one shape, each sum in f32 and rounded once (torch's add of two half tensors)
+template <typename T> __device__ void add_same(const T *a, const T *b, T *y, long n) {
+    const long i0 = ((long)blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    if (i0 >= n) return;
+    if (i0 + 8 <= n && vec_aligned<T>(a) && vec_aligned<T>(b) && vec_aligned<T>(y)) {
+#pragma unroll
+        for (int k = 0; k < 8; k += 4) {
+            const Vec4<T> va = vload(a + i0 + k), vb = vload(b + i0 + k);
+            Vec4<T> o;
+#pragma unroll
+            for (int j = 0; j < 4; j++) o.v[j] = from_f<T>(to_f<T>(va.v[j]) + to_f<T>(vb.v[j]));
+            vstore(y + i0 + k, o);
+        }
+        return;
+    }
+    for (long i = i0; i < i0 + 8 && i < n; i++) y[i] = from_f<T>(to_f<T>(a[i]) + to_f<T>(b[i]));
+}
+
+// x (planes, hw) + e, one value of e for each plane (e holds ec values, plane p takes e[p % ec]: a
+// bias for each channel, or a value for each (n, channel)). A block row per plane. With e2 (ec2
+// values, 0 for none) a second such add follows, the first sum rounded before it as two kernels
+// would round it.
+template <typename T> __device__ void add_planes(const T *x, const T *e, const T *e2, T *y, int hw, int ec, int ec2) {
+    const int p = blockIdx.y;
+    const float ev = to_f<T>(e[p % ec]);
+    const float ev2 = ec2 ? to_f<T>(e2[p % ec2]) : 0.f;
+    const T *xp = x + (long)p * hw;
+    T *yp = y + (long)p * hw;
+    const int i0 = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    if (i0 >= hw) return;
+    if (i0 + 8 <= hw && vec_aligned<T>(xp) && vec_aligned<T>(yp)) {
+#pragma unroll
+        for (int k = 0; k < 8; k += 4) {
+            const Vec4<T> v = vload(xp + i0 + k);
+            Vec4<T> o;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                T s = from_f<T>(to_f<T>(v.v[j]) + ev);
+                if (ec2) s = from_f<T>(to_f<T>(s) + ev2);
+                o.v[j] = s;
+            }
+            vstore(yp + i0 + k, o);
+        }
+        return;
+    }
+    for (int i = i0; i < i0 + 8 && i < hw; i++) {
+        T s = from_f<T>(to_f<T>(xp[i]) + ev);
+        if (ec2) s = from_f<T>(to_f<T>(s) + ev2);
+        yp[i] = s;
+    }
+}
+
+// x (B, C, HW) -> y (B, HW, C), the copy that turns feature maps into tokens: a thread takes eight
+// channels of one token, a block row eight channels, so a warp reads eight runs of 32 neighbouring
+// values and writes 32 groups of eight
+template <typename T> __device__ void planes_to_tokens(const T *x, T *y, int B, int C, int HW) {
+    const unsigned tok = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tok >= (unsigned)B * HW) return;
+    const int c0 = blockIdx.y * 8;
+    const unsigned b = tok / HW, i = tok - b * HW;
+    const T *xp = x + ((long)b * C + c0) * HW + i;
+    T *yp = y + (long)tok * C + c0;
+    if (vec_aligned<T>(yp)) {
+#pragma unroll
+        for (int k = 0; k < 8; k += 4) {
+            Vec4<T> o;
+#pragma unroll
+            for (int j = 0; j < 4; j++) o.v[j] = xp[(long)(k + j) * HW];
+            vstore(yp + k, o);
+        }
+        return;
+    }
+#pragma unroll
+    for (int j = 0; j < 8; j++) yp[j] = xp[(long)j * HW];
+}
+
+// t (B, HW, C) -> y (B, C, HW), the copy back, the same threads; with r (B, C, HW) the sum
+// y = t + r in that layout
+template <typename T> __device__ void tokens_to_planes(const T *t, const T *r, T *y, int B, int C, int HW, int has_r) {
+    const unsigned tok = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tok >= (unsigned)B * HW) return;
+    const int c0 = blockIdx.y * 8;
+    const unsigned b = tok / HW, i = tok - b * HW;
+    const T *tp = t + (long)tok * C + c0;
+    const long o = ((long)b * C + c0) * HW + i;
+    T v[8];
+    if (vec_aligned<T>(tp)) {
+        const Vec4<T> lo = vload(tp), hi = vload(tp + 4);
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            v[j] = lo.v[j];
+            v[4 + j] = hi.v[j];
+        }
+    } else {
+#pragma unroll
+        for (int j = 0; j < 8; j++) v[j] = tp[j];
+    }
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+        const long at = o + (long)j * HW;
+        y[at] = has_r ? from_f<T>(to_f<T>(v[j]) + to_f<T>(r[at])) : v[j];
+    }
+}
+
+#define INSTANTIATE_PASSES(T, SUFFIX)                                                                              \
+    extern "C" __global__ void add_##SUFFIX(const T *a, const T *b, T *y, long n) { add_same<T>(a, b, y, n); }     \
+    extern "C" __global__ void add_planes_##SUFFIX(const T *x, const T *e, const T *e2, T *y, int hw, int ec,      \
+                                                   int ec2) {                                                      \
+        add_planes<T>(x, e, e2, y, hw, ec, ec2);                                                                   \
+    }                                                                                                              \
+    extern "C" __global__ void planes_to_tokens_##SUFFIX(const T *x, T *y, int B, int C, int HW) {                 \
+        planes_to_tokens<T>(x, y, B, C, HW);                                                                       \
+    }                                                                                                              \
+    extern "C" __global__ void tokens_to_planes_##SUFFIX(const T *t, const T *r, T *y, int B, int C, int HW,       \
+                                                         int has_r) {                                              \
+        tokens_to_planes<T>(t, r, y, B, C, HW, has_r);                                                             \
+    }
+
+INSTANTIATE_PASSES(__half, f16)
+INSTANTIATE_PASSES(__nv_bfloat16, bf16)
+INSTANTIATE_PASSES(float, f32)

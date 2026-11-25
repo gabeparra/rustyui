@@ -17,15 +17,15 @@ pub(crate) struct ResBlock {
 
 impl ResBlock {
     fn forward(&self, x: &Tensor, emb: &Tensor) -> Result<Tensor> {
-        let h = self.in_conv.forward(&self.in_norm.forward_silu(x)?)?;
-        let e = self.emb.forward(&crate::kernels::torch_silu(emb)?)?.to_dtype(h.dtype())?.unsqueeze(2)?.unsqueeze(3)?;
-        let h = h.broadcast_add(&e)?;
+        let e = self.emb.forward(&crate::kernels::torch_silu(emb)?)?.to_dtype(x.dtype())?.unsqueeze(2)?.unsqueeze(3)?;
+        // the convolution's bias and the embedding in one pass over its output
+        let h = self.in_conv.forward_plus(&self.in_norm.forward_silu(x)?, &e)?;
         let h = self.out_conv.forward(&self.out_norm.forward_silu(&h)?)?;
         let skip = match &self.skip {
             Some(c) => c.forward(x)?,
             None => x.clone(),
         };
-        Ok((skip + h)?)
+        Ok(crate::kernels::add(&skip, &h)?)
     }
 }
 
@@ -206,13 +206,13 @@ struct Block {
 impl Block {
     fn forward(&self, x: &Tensor, ctx: &Tensor, couple: Option<(&CoupleCall, (usize, usize))>) -> Result<Tensor> {
         let n = self.norm1.forward(x)?;
-        let x = (self.attn1.forward(&n, &n)? + x)?;
+        let x = crate::kernels::add(&self.attn1.forward(&n, &n)?, x)?;
         let n = self.norm2.forward(&x)?;
         let a2 = match couple {
             Some((cc, latent)) => self.attn2.forward_couple(&n, cc, latent)?,
             None => self.attn2.forward_cross(&n, ctx)?,
         };
-        let x = (a2 + &x)?;
+        let x = crate::kernels::add(&a2, &x)?;
         // GEGLU: value * gelu(gate), the projection's two halves
         let h = self.ff_in.forward(&self.norm3.forward(&x)?)?;
         let h = crate::profile::time("geglu", h.device(), || {
@@ -223,7 +223,7 @@ impl Block {
                 h.narrow(2, 0, half)? * h.narrow(2, half, half)?.gelu_erf()?
             }
         })?;
-        Ok((&x + self.ff_out.forward(&h)?)?)
+        Ok(crate::kernels::add(&x, &self.ff_out.forward(&h)?)?)
     }
 }
 
@@ -236,15 +236,15 @@ pub(crate) struct Transformer {
 
 impl Transformer {
     fn forward(&self, x: &Tensor, ctx: &Tensor, couple: Option<(&CoupleCall, (usize, usize))>) -> Result<Tensor> {
-        let (b, c, h, w) = x.dims4()?;
-        let mut t = self.norm.forward(x)?.reshape((b, c, h * w))?.transpose(1, 2)?.contiguous()?;
+        let (_, _, h, w) = x.dims4()?;
+        let mut t = crate::kernels::planes_to_tokens(&self.norm.forward(x)?)?;
         t = self.proj_in.forward(&t)?;
         for blk in &self.blocks {
             t = blk.forward(&t, ctx, couple)?;
         }
         t = self.proj_out.forward(&t)?;
-        let t = t.transpose(1, 2)?.reshape((b, c, h, w))?;
-        Ok((t + x)?)
+        // back to feature maps and the residual in one pass
+        Ok(crate::kernels::tokens_to_planes(&t, h, w, Some(x))?)
     }
 }
 

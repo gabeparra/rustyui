@@ -51,7 +51,18 @@ pub struct GroupNormOp {
     pub groups: usize,
     pub eps: f32,
     pub silu: bool,
+    /// the statistics and the affine pass in one kernel (the form kept for inputs whose planes do
+    /// not fit a grid, and to check the two-kernel form against)
+    pub one_pass: bool,
 }
+
+/// the block of the eight-values-a-thread kernels, and their grid over n values
+const VEC_BLOCK: u32 = 128;
+fn vec_grid(n: usize) -> u32 {
+    n.div_ceil(8 * VEC_BLOCK as usize) as u32
+}
+/// the most block rows a grid takes
+const MAX_GRID_Y: usize = 65535;
 
 impl CustomOp3 for GroupNormOp {
     fn name(&self) -> &'static str {
@@ -87,6 +98,40 @@ impl CustomOp3 for GroupNormOp {
         let cfg = LaunchConfig { grid_dim: ((n * self.groups) as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
         let (ci, gi, eps, silu) = (c as i32, self.groups as i32, self.eps, self.silu as i32);
         let dt = x.dtype();
+        if !self.one_pass && n * c <= MAX_GRID_Y && hw <= i32::MAX as i64 && hw > 0 {
+            // the statistics with that launch, then the affine pass with the whole card (ops.cu
+            // group_norm_stats, group_norm_apply): the one-kernel form below runs it on a block
+            // per group, 64 blocks for SDXL's batch of two
+            let dev: &CudaDevice = x.device();
+            let sfx = suffix(dt)?;
+            let stats_f = dev.get_or_load_custom_func(&format!("group_norm_stats_{sfx}"), "rustyui_ops", PTX)?;
+            let apply_f = dev.get_or_load_custom_func(&format!("group_norm_apply_{sfx}"), "rustyui_ops", PTX)?;
+            let stats = unsafe { dev.alloc::<f32>(n * self.groups * 2)? };
+            let hwi = hw as i32;
+            let apply_cfg =
+                LaunchConfig { grid_dim: (vec_grid(hw as usize), (n * c) as u32, 1), block_dim: (VEC_BLOCK, 1, 1), shared_mem_bytes: 0 };
+            macro_rules! go {
+                ($t:ty) => {{
+                    let xs = x.as_cuda_slice::<$t>()?.slice(contiguous(xl, "x")?..);
+                    let gs = g.as_cuda_slice::<$t>()?.slice(contiguous(gl, "gamma")?..);
+                    let bs = b.as_cuda_slice::<$t>()?.slice(contiguous(bl, "beta")?..);
+                    let out = unsafe { dev.alloc::<$t>(xl.shape().elem_count())? };
+                    let mut k = stats_f.builder();
+                    k.arg(&xs).arg(&stats).arg(&ci).arg(&hw).arg(&gi).arg(&eps);
+                    unsafe { k.launch(cfg) }.w()?;
+                    let mut k = apply_f.builder();
+                    k.arg(&xs).arg(&out).arg(&gs).arg(&bs).arg(&stats).arg(&ci).arg(&hwi).arg(&gi).arg(&silu);
+                    unsafe { k.launch(apply_cfg) }.w()?;
+                    CudaStorage::wrap_cuda_slice(out, dev.clone())
+                }};
+            }
+            let out = match dt {
+                DType::F16 => go!(half::f16),
+                DType::BF16 => go!(half::bf16),
+                _ => go!(f32),
+            };
+            return Ok((out, xl.shape().clone()));
+        }
         let name = format!("group_norm_{}", suffix(dt)?);
         let out = match dt {
             DType::F16 => launch3!(half::f16, &name, x, xl, g, gl, b, bl, cfg, [&ci, &hw, &gi, &eps, &silu]),
@@ -144,7 +189,10 @@ impl CustomOp3 for LayerNormOp {
     }
 }
 
-pub struct GegluOp;
+pub struct GegluOp {
+    /// one value a thread, the form kept for rows that do not come in eights
+    pub one_value: bool,
+}
 
 impl CustomOp1 for GegluOp {
     fn name(&self) -> &'static str {
@@ -165,9 +213,19 @@ impl CustomOp1 for GegluOp {
         let n = rows * half;
         let dev = h.device();
         let off = contiguous(hl, "h")?;
-        let cfg = LaunchConfig::for_num_elems(n as u32);
+        // eight values a thread (ops.cu geglu8) when a row's values come in eights and start aligned
+        let wide = !self.one_value && half.is_multiple_of(8) && off.is_multiple_of(4) && n / 8 <= u32::MAX as usize;
+        let cfg = if wide {
+            LaunchConfig {
+                grid_dim: ((n / 8).div_ceil(VEC_BLOCK as usize) as u32, 1, 1),
+                block_dim: (VEC_BLOCK, 1, 1),
+                shared_mem_bytes: 0,
+            }
+        } else {
+            LaunchConfig::for_num_elems(n as u32)
+        };
         let (rows_i, half_i) = (rows as i64, half as i32);
-        let name = format!("geglu_{}", suffix(h.dtype())?);
+        let name = format!("{}_{}", if wide { "geglu8" } else { "geglu" }, suffix(h.dtype())?);
         let func = dev.get_or_load_custom_func(&name, "rustyui_ops", PTX)?;
         macro_rules! go {
             ($t:ty) => {{
@@ -192,7 +250,12 @@ impl CustomOp1 for GegluOp {
 }
 
 pub fn group_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, groups: usize, eps: f64, silu: bool) -> Result<Tensor> {
-    x.contiguous()?.apply_op3_no_bwd(gamma, beta, &GroupNormOp { groups, eps: eps as f32, silu })
+    x.contiguous()?.apply_op3_no_bwd(gamma, beta, &GroupNormOp { groups, eps: eps as f32, silu, one_pass: false })
+}
+
+/// group_norm as one kernel
+pub fn group_norm_one_pass(x: &Tensor, gamma: &Tensor, beta: &Tensor, groups: usize, eps: f64, silu: bool) -> Result<Tensor> {
+    x.contiguous()?.apply_op3_no_bwd(gamma, beta, &GroupNormOp { groups, eps: eps as f32, silu, one_pass: true })
 }
 
 pub fn layer_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<Tensor> {
@@ -200,7 +263,268 @@ pub fn layer_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result
 }
 
 pub fn geglu(h: &Tensor) -> Result<Tensor> {
-    h.contiguous()?.apply_op1_no_bwd(&GegluOp)
+    h.contiguous()?.apply_op1_no_bwd(&GegluOp { one_value: false })
+}
+
+/// geglu with one value a thread
+pub fn geglu_one_value(h: &Tensor) -> Result<Tensor> {
+    h.contiguous()?.apply_op1_no_bwd(&GegluOp { one_value: true })
+}
+
+// ── whole-tensor passes, eight values a thread (ops.cu) ──────────────────────
+// candle's own binary and copy kernels work out every value's place from the shape with a division
+// for each dimension when an operand is broadcast or permuted, and move one value a thread. These
+// cover the adds and the two layout copies a UNet step is made of; anything else goes to candle.
+
+fn passes_dtype(t: &Tensor) -> bool {
+    t.device().is_cuda() && matches!(t.dtype(), DType::F16 | DType::BF16 | DType::F32)
+}
+
+fn wrap(st: CudaStorage, shape: impl Into<Shape>) -> Tensor {
+    Tensor::from_storage(candle_core::Storage::Cuda(st), shape, candle_core::op::BackpropOp::none(), false)
+}
+
+macro_rules! by_dtype {
+    ($dt:expr, $go:ident) => {
+        match $dt {
+            DType::F16 => $go!(half::f16),
+            DType::BF16 => $go!(half::bf16),
+            _ => $go!(f32),
+        }
+    };
+}
+
+/// a + b for two tensors of one shape, each sum rounded once (torch's add)
+pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    if !passes_dtype(a) || a.dtype() != b.dtype() || a.dims() != b.dims() || a.elem_count() == 0 {
+        return a.broadcast_add(b);
+    }
+    let dev = cuda_dev(a)?;
+    let (ac, bc) = (a.contiguous()?, b.contiguous()?);
+    let n = a.elem_count();
+    let (ag, al) = ac.storage_and_layout();
+    let (bg, bl) = bc.storage_and_layout();
+    let func = dev.get_or_load_custom_func(&format!("add_{}", suffix(a.dtype())?), "rustyui_ops", PTX)?;
+    let cfg = LaunchConfig { grid_dim: (vec_grid(n), 1, 1), block_dim: (VEC_BLOCK, 1, 1), shared_mem_bytes: 0 };
+    let ni = n as i64;
+    macro_rules! go {
+        ($t:ty) => {{
+            let av = on_gpu(&ag)?.as_cuda_slice::<$t>()?.slice(contiguous(al, "a")?..);
+            let bv = on_gpu(&bg)?.as_cuda_slice::<$t>()?.slice(contiguous(bl, "b")?..);
+            let y = unsafe { dev.alloc::<$t>(n)? };
+            let mut k = func.builder();
+            k.arg(&av).arg(&bv).arg(&y).arg(&ni);
+            unsafe { k.launch(cfg) }.w()?;
+            CudaStorage::wrap_cuda_slice(y, dev.clone())
+        }};
+    }
+    let st = by_dtype!(a.dtype(), go);
+    Ok(wrap(st, a.shape()))
+}
+
+/// whether e holds one value for each of x's channels, (1, C, 1, ..), or for each (n, channel), (N, C, 1, ..)
+fn plane_values(x: &Tensor, e: &Tensor) -> bool {
+    let (xd, ed) = (x.dims(), e.dims());
+    xd.len() >= 3
+        && ed.len() == xd.len()
+        && ed[1] == xd[1]
+        && (ed[0] == 1 || ed[0] == xd[0])
+        && ed[2..].iter().all(|&d| d == 1)
+        && e.dtype() == x.dtype()
+}
+
+/// x (N, C, ..) + e, then + e2 if given, where each holds one value for a channel or for an
+/// (n, channel): the sums of x.broadcast_add(e) and of a second broadcast_add after it, rounded
+/// after each as the two would round, in one pass
+pub fn add_planes(x: &Tensor, e: &Tensor, e2: Option<&Tensor>) -> Result<Tensor> {
+    let hw: usize = x.dims().iter().skip(2).product();
+    let planes = x.dims().iter().take(2).product::<usize>();
+    if !passes_dtype(x)
+        || !plane_values(x, e)
+        || !e2.is_none_or(|e2| plane_values(x, e2))
+        || planes > MAX_GRID_Y
+        || hw == 0
+        || hw > i32::MAX as usize
+    {
+        let y = x.broadcast_add(e)?;
+        return match e2 {
+            Some(e2) => y.broadcast_add(e2),
+            None => Ok(y),
+        };
+    }
+    let dev = cuda_dev(x)?;
+    let (xc, ec) = (x.contiguous()?, e.contiguous()?);
+    let e2c = e2.unwrap_or(e).contiguous()?;
+    let n = x.elem_count();
+    let (xg, xl) = xc.storage_and_layout();
+    let (eg, el) = ec.storage_and_layout();
+    let (e2g, e2l) = e2c.storage_and_layout();
+    let func = dev.get_or_load_custom_func(&format!("add_planes_{}", suffix(x.dtype())?), "rustyui_ops", PTX)?;
+    let cfg = LaunchConfig { grid_dim: (vec_grid(hw), planes as u32, 1), block_dim: (VEC_BLOCK, 1, 1), shared_mem_bytes: 0 };
+    let (hwi, eci, ec2i) = (hw as i32, e.elem_count() as i32, e2.map_or(0, |t| t.elem_count()) as i32);
+    macro_rules! go {
+        ($t:ty) => {{
+            let xv = on_gpu(&xg)?.as_cuda_slice::<$t>()?.slice(contiguous(xl, "x")?..);
+            let ev = on_gpu(&eg)?.as_cuda_slice::<$t>()?.slice(contiguous(el, "e")?..);
+            let e2v = on_gpu(&e2g)?.as_cuda_slice::<$t>()?.slice(contiguous(e2l, "e2")?..);
+            let y = unsafe { dev.alloc::<$t>(n)? };
+            let mut k = func.builder();
+            k.arg(&xv).arg(&ev).arg(&e2v).arg(&y).arg(&hwi).arg(&eci).arg(&ec2i);
+            unsafe { k.launch(cfg) }.w()?;
+            CudaStorage::wrap_cuda_slice(y, dev.clone())
+        }};
+    }
+    let st = by_dtype!(x.dtype(), go);
+    Ok(wrap(st, x.shape()))
+}
+
+/// x (B, C, H, W) as tokens (B, H*W, C): x.reshape((b, c, h * w)).transpose(1, 2).contiguous()
+pub fn planes_to_tokens(x: &Tensor) -> Result<Tensor> {
+    let (b, c, h, w) = x.dims4()?;
+    let hw = h * w;
+    if !passes_dtype(x) || !c.is_multiple_of(8) || b * hw == 0 || b * hw > u32::MAX as usize {
+        return x.reshape((b, c, hw))?.transpose(1, 2)?.contiguous();
+    }
+    let dev = cuda_dev(x)?;
+    let xc = x.contiguous()?;
+    let n = x.elem_count();
+    let (xg, xl) = xc.storage_and_layout();
+    let func = dev.get_or_load_custom_func(&format!("planes_to_tokens_{}", suffix(x.dtype())?), "rustyui_ops", PTX)?;
+    let cfg = LaunchConfig {
+        grid_dim: ((b * hw).div_ceil(VEC_BLOCK as usize) as u32, (c / 8) as u32, 1),
+        block_dim: (VEC_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (bi, ci, hwi) = (b as i32, c as i32, hw as i32);
+    macro_rules! go {
+        ($t:ty) => {{
+            let xv = on_gpu(&xg)?.as_cuda_slice::<$t>()?.slice(contiguous(xl, "x")?..);
+            let y = unsafe { dev.alloc::<$t>(n)? };
+            let mut k = func.builder();
+            k.arg(&xv).arg(&y).arg(&bi).arg(&ci).arg(&hwi);
+            unsafe { k.launch(cfg) }.w()?;
+            CudaStorage::wrap_cuda_slice(y, dev.clone())
+        }};
+    }
+    let st = by_dtype!(x.dtype(), go);
+    Ok(wrap(st, (b, hw, c)))
+}
+
+/// tokens t (B, H*W, C) as feature maps (B, C, H, W): t.transpose(1, 2).reshape((b, c, h, w)); with
+/// `plus` (B, C, H, W) that result + plus, in the one pass
+pub fn tokens_to_planes(t: &Tensor, h: usize, w: usize, plus: Option<&Tensor>) -> Result<Tensor> {
+    let (b, hw, c) = t.dims3()?;
+    let fits = plus.is_none_or(|p| p.dims() == [b, c, h, w] && p.dtype() == t.dtype());
+    if !passes_dtype(t) || hw != h * w || !fits || !c.is_multiple_of(8) || b * hw == 0 || b * hw > u32::MAX as usize {
+        let y = t.transpose(1, 2)?.reshape((b, c, h, w))?;
+        return match plus {
+            Some(p) => y.broadcast_add(p),
+            None => Ok(y),
+        };
+    }
+    let dev = cuda_dev(t)?;
+    let tc = t.contiguous()?;
+    let pc = plus.unwrap_or(t).contiguous()?;
+    let n = t.elem_count();
+    let (tg, tl) = tc.storage_and_layout();
+    let (pg, pl) = pc.storage_and_layout();
+    let func = dev.get_or_load_custom_func(&format!("tokens_to_planes_{}", suffix(t.dtype())?), "rustyui_ops", PTX)?;
+    let cfg = LaunchConfig {
+        grid_dim: ((b * hw).div_ceil(VEC_BLOCK as usize) as u32, (c / 8) as u32, 1),
+        block_dim: (VEC_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (bi, ci, hwi, has) = (b as i32, c as i32, hw as i32, plus.is_some() as i32);
+    macro_rules! go {
+        ($t:ty) => {{
+            let tv = on_gpu(&tg)?.as_cuda_slice::<$t>()?.slice(contiguous(tl, "t")?..);
+            let pv = on_gpu(&pg)?.as_cuda_slice::<$t>()?.slice(contiguous(pl, "plus")?..);
+            let y = unsafe { dev.alloc::<$t>(n)? };
+            let mut k = func.builder();
+            k.arg(&tv).arg(&pv).arg(&y).arg(&bi).arg(&ci).arg(&hwi).arg(&has);
+            unsafe { k.launch(cfg) }.w()?;
+            CudaStorage::wrap_cuda_slice(y, dev.clone())
+        }};
+    }
+    let st = by_dtype!(t.dtype(), go);
+    Ok(wrap(st, (b, c, h, w)))
+}
+
+/// The eight-values-a-thread passes against the forms they replace, on random values of SDXL's
+/// shapes in each dtype, bit for bit: add and add_planes against candle's adds, the two layout
+/// copies against candle's, geglu and group_norm against their one-kernel forms, and layer_norm on
+/// aligned rows against rows that start off the alignment (which take its one-value loads).
+pub fn debug_passes(dev: &candle_core::Device) -> Result<()> {
+    fn bits(t: &Tensor) -> Result<Vec<u32>> {
+        let f = t.flatten_all()?;
+        Ok(match t.dtype() {
+            DType::F16 => f.to_vec1::<half::f16>()?.iter().map(|v| v.to_bits() as u32).collect(),
+            DType::BF16 => f.to_vec1::<half::bf16>()?.iter().map(|v| v.to_bits() as u32).collect(),
+            _ => f.to_vec1::<f32>()?.iter().map(|v| v.to_bits()).collect(),
+        })
+    }
+    let mut bad = 0usize;
+    let mut check = |what: &str, new: &Tensor, old: &Tensor| -> Result<()> {
+        let differ =
+            if new.dims() != old.dims() { usize::MAX } else { bits(new)?.iter().zip(bits(old)?.iter()).filter(|(a, b)| a != b).count() };
+        bad += (differ != 0) as usize;
+        println!("{what:64} {:>10} of {:>10} differ {}", differ, old.elem_count(), if differ == 0 { "exact" } else { "MISMATCH" });
+        Ok(())
+    };
+    // values over many binades, so sums and products round at every place
+    let rand = |shape: &[usize], dt: DType| -> Result<Tensor> {
+        (Tensor::randn(0f32, 1f32, shape, dev)? * (Tensor::randn(0f32, 1f32, shape, dev)? * 2.5)?.exp()?)?.to_dtype(dt)
+    };
+    // the same values in memory that starts one value off the alignment
+    let shifted = |t: &Tensor| -> Result<Tensor> {
+        let n = t.elem_count();
+        Tensor::cat(&[t.flatten_all()?.narrow(0, 0, 1)?, t.flatten_all()?], 0)?.narrow(0, 1, n)?.reshape(t.shape())
+    };
+    for dt in [DType::F16, DType::BF16, DType::F32] {
+        for (b, c, h, w) in [(2usize, 1280usize, 26usize, 38usize), (2, 640, 52, 76), (1, 320, 104, 152), (3, 64, 5, 7)] {
+            let tag = format!("{dt:?} ({b}, {c}, {h}, {w})");
+            let (x, y) = (rand(&[b, c, h, w], dt)?, rand(&[b, c, h, w], dt)?);
+            check(&format!("add {tag}"), &add(&x, &y)?, &(&x + &y)?)?;
+            check(&format!("add, off the alignment {tag}"), &add(&shifted(&x)?, &y)?, &(&x + &y)?)?;
+            let (bias, emb) = (rand(&[1, c, 1, 1], dt)?, rand(&[b, c, 1, 1], dt)?);
+            check(&format!("add_planes, a bias {tag}"), &add_planes(&x, &bias, None)?, &x.broadcast_add(&bias)?)?;
+            check(
+                &format!("add_planes, a bias then (n, c) {tag}"),
+                &add_planes(&x, &bias, Some(&emb))?,
+                &x.broadcast_add(&bias)?.broadcast_add(&emb)?,
+            )?;
+            check(&format!("add_planes, off the alignment {tag}"), &add_planes(&shifted(&x)?, &emb, None)?, &x.broadcast_add(&emb)?)?;
+            let tokens = x.reshape((b, c, h * w))?.transpose(1, 2)?.contiguous()?;
+            check(&format!("planes_to_tokens {tag}"), &planes_to_tokens(&x)?, &tokens)?;
+            let t = rand(&[b, h * w, c], dt)?;
+            let back = t.transpose(1, 2)?.reshape((b, c, h, w))?;
+            check(&format!("tokens_to_planes {tag}"), &tokens_to_planes(&t, h, w, None)?, &back)?;
+            check(&format!("tokens_to_planes, plus {tag}"), &tokens_to_planes(&t, h, w, Some(&x))?, &(&back + &x)?)?;
+            check(
+                &format!("tokens_to_planes, off the alignment {tag}"),
+                &tokens_to_planes(&shifted(&t)?, h, w, Some(&x))?,
+                &(&back + &x)?,
+            )?;
+            let (ga, be) = (rand(&[c], dt)?, rand(&[c], dt)?);
+            for silu in [false, true] {
+                let old = group_norm_one_pass(&x, &ga, &be, 32, 1e-5, silu)?;
+                check(&format!("group_norm, silu {silu} {tag}"), &group_norm(&x, &ga, &be, 32, 1e-5, silu)?, &old)?;
+                check(
+                    &format!("group_norm, off the alignment, silu {silu} {tag}"),
+                    &group_norm(&shifted(&x)?, &ga, &be, 32, 1e-5, silu)?,
+                    &old,
+                )?;
+            }
+            let hh = rand(&[b, h * w, 8 * c], dt)?;
+            check(&format!("geglu {tag}"), &geglu(&hh)?, &geglu_one_value(&hh)?)?;
+            check(&format!("layer_norm {tag}"), &layer_norm(&t, &ga, &be, 1e-5)?, &layer_norm(&shifted(&t)?, &ga, &be, 1e-5)?)?;
+        }
+    }
+    if bad != 0 {
+        candle_core::bail!("{bad} of the passes differ from the forms they replace");
+    }
+    println!("every pass gives the values of the form it replaces");
+    Ok(())
 }
 
 // ── the cuBLASLt handle, one per thread ──────────────────────────────────────

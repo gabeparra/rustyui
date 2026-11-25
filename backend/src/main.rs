@@ -228,6 +228,11 @@ fn main() -> Result<()> {
             println!("{}", ltx_video::image_to_video(&o, &start, strength, &models_dir())?.display());
             Ok(())
         }
+        Some("debug-passes") => {
+            // the eight-values-a-thread passes against the forms they replace, bit for bit
+            kernels::debug_passes(&candle_core::Device::new_cuda(0)?)?;
+            Ok(())
+        }
         Some("debug-conv") => {
             // torch's cuDNN convolutions (refs/conv_ref.py) against kernels::cudnn_conv
             let refs = args.get(2).context("debug-conv REF.safetensors (refs/conv_ref.py)")?;

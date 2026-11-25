@@ -13,7 +13,12 @@ All notable changes to rustyui are listed here. The format follows
   GEGLU and layout copies, no zero-filling of buffers that are overwritten, and the prompt projected
   for cross-attention once a sampler run.
 - LTX-2.3: the blocks of the 42 GB DiT that do not fit on a 24 GB card are streamed from page-locked
-  memory one block ahead.
+  memory one block ahead; the video decode and a new prompt let only the blocks they need leave the
+  card; the video VAE loads in 0.08 s instead of 1 s. On an RTX 4090 the video example takes 35.5 s
+  from process start against ComfyUI's 47.8 s and 15.6 s against 17.2 s for a repeat, with identical
+  output.
+- LTX-2.3: a sampling that runs out of memory part-way keeps more memory free and starts over
+  instead of failing the job.
 - `debug-passes` checks the fast kernels bit for bit against the forms they replace.
 
 ### In progress

@@ -590,11 +590,24 @@ step. When the work stops, rustyui lets the card go: it unloads its models after
 and exits after 120 s with no request, so the card was back to its idle memory 131 s after the last job,
 where ComfyUI keeps its models (7.1 GB here) until it is stopped.
 
-LTX-2.3 is slower still with the published 42 GB bf16 DiT listed under
-[Supported models](#supported-models): it does not fit on a 24 GB card, so rustyui keeps 23 of its
-48 blocks on the card and streams the rest every step. On the [video example](#examples) (640x448,
-153 frames, 8 steps) a single run on 2026-11-11 (commit 01ec968) took 65.7 s from process start against ComfyUI's 42.1 s, and the
-8 steps 27.6 s against 10.5 s.
+LTX-2.3 with the published 42 GB bf16 DiT listed under [Supported models](#supported-models) does not
+fit on a 24 GB card, so rustyui keeps as many of its 48 blocks on the card as leave room for the work
+(18 or 19 here, with the desktop holding 5.8 GB) and streams the rest every step from page-locked
+memory, one block ahead. On the [video example](#examples) (640x448, 153 frames, 8 steps), measured on
+2026-11-25 at commit 575afb9 the same way as the table above, with all 9 videos identical to ComfyUI's
+in every frame and sound sample:
+
+| LTX-2.3 image to video | ComfyUI | rustyui |
+|---|---|---|
+| from process start | 47.8 s | 35.5 s |
+| warm, new seed | 17.2 s | 15.6 s |
+| warm, new prompt | 19.2 s | 20.1 s |
+| the 8 sampling steps | 12.9 s | 12.6 s |
+
+A new prompt is the one row where rustyui is behind: it reads Gemma 3's weights from the file again for
+every prompt, and with memory short part of the file had left the page cache; the three runs took
+19.5, 20.1 and 23.9 s. The video decode and a new prompt let
+only as many of the DiT's blocks leave the card as they need, and the next sampling brings those back.
 
 An earlier measurement on an RTX 4070 Ti SUPER had the two-LoRA graph at 15.0 s for rustyui against
 41.6 s for ComfyUI, and earlier LTX timings were taken with a DiT file that fits on the card whole.

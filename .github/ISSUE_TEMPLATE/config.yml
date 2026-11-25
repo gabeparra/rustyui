@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Question or idea
+    url: https://github.com/gabeparra/rustyui/discussions
+    about: How to do something, whether a model or node is planned, anything that is not a bug yet.
   - name: Security issue
     url: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
     about: Please report security problems privately, as described in SECURITY.md.

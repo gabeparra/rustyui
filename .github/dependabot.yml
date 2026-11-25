@@ -1,0 +1,10 @@
+# The workflow's actions only. The Rust crates are pinned by Cargo.lock on purpose (the numbers
+# depend on them), and ui/ is upstream ComfyUI_frontend, updated as a whole (ui/UPSTREAM.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

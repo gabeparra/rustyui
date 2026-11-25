@@ -29,7 +29,7 @@ impl Res {
             Some(c) => c.forward(x)?,
             None => x.clone(),
         };
-        Ok((x + h)?)
+        Ok(crate::kernels::add(&x, &h)?)
     }
 }
 
@@ -45,7 +45,7 @@ impl AttnBlock {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let n = self.norm.forward(x)?;
         let a = Self::attend(&self.q.forward(&n)?, &self.k.forward(&n)?, &self.v.forward(&n)?)?;
-        Ok((x + self.proj.forward(&a)?)?)
+        Ok(crate::kernels::add(x, &self.proj.forward(&a)?)?)
     }
 
     fn attend(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
@@ -156,8 +156,7 @@ impl Decoder {
                 h = b.forward(&h)?;
             }
             if let Some(c) = upsample {
-                let (_, _, hh, ww) = h.dims4()?;
-                h = c.forward(&h.upsample_nearest2d(hh * 2, ww * 2)?)?;
+                h = c.forward(&crate::kernels::upsample2x(&h)?)?;
             }
         }
         let h = self.conv_out.forward(&self.norm_out.forward_silu(&h)?)?;

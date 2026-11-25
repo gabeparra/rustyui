@@ -126,8 +126,7 @@ impl Esrgan {
         stage(1, &h)?;
         let mut k = 2;
         for u in &self.up {
-            let (_, _, hh, ww) = h.dims4()?;
-            let wide = h.upsample_nearest2d(hh * 2, ww * 2)?;
+            let wide = crate::kernels::upsample2x(&h)?;
             stage(k, &wide)?;
             let y = run_conv(u, &wide, nhwc)?;
             drop(wide);

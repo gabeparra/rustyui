@@ -410,6 +410,37 @@ pub fn planes_to_tokens(x: &Tensor) -> Result<Tensor> {
     Ok(wrap(st, (b, hw, c)))
 }
 
+/// x (B, C, H, W) twice as large each way, every value to a 2x2 square: x.upsample_nearest2d(2 * h, 2 * w)
+pub fn upsample2x(x: &Tensor) -> Result<Tensor> {
+    let (b, c, h, w) = x.dims4()?;
+    if !passes_dtype(x) || b * c > MAX_GRID_Y || h * w == 0 || 4 * h * w > i32::MAX as usize {
+        return x.upsample_nearest2d(2 * h, 2 * w);
+    }
+    let dev = cuda_dev(x)?;
+    let xc = x.contiguous()?;
+    let n = 4 * x.elem_count();
+    let (xg, xl) = xc.storage_and_layout();
+    let func = dev.get_or_load_custom_func(&format!("upsample2x_{}", suffix(x.dtype())?), "rustyui_ops", PTX)?;
+    let cfg = LaunchConfig {
+        grid_dim: ((h * w).div_ceil(4 * VEC_BLOCK as usize) as u32, (b * c) as u32, 1),
+        block_dim: (VEC_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (hi, wi) = (h as i32, w as i32);
+    macro_rules! go {
+        ($t:ty) => {{
+            let xv = on_gpu(&xg)?.as_cuda_slice::<$t>()?.slice(contiguous(xl, "x")?..);
+            let y = unsafe { dev.alloc::<$t>(n)? };
+            let mut k = func.builder();
+            k.arg(&xv).arg(&y).arg(&hi).arg(&wi);
+            unsafe { k.launch(cfg) }.w()?;
+            CudaStorage::wrap_cuda_slice(y, dev.clone())
+        }};
+    }
+    let st = by_dtype!(x.dtype(), go);
+    Ok(wrap(st, (b, c, 2 * h, 2 * w)))
+}
+
 /// tokens t (B, H*W, C) as feature maps (B, C, H, W): t.transpose(1, 2).reshape((b, c, h, w)); with
 /// `plus` (B, C, H, W) that result + plus, in the one pass
 pub fn tokens_to_planes(t: &Tensor, h: usize, w: usize, plus: Option<&Tensor>) -> Result<Tensor> {
@@ -453,7 +484,8 @@ pub fn tokens_to_planes(t: &Tensor, h: usize, w: usize, plus: Option<&Tensor>) -
 /// The eight-values-a-thread passes against the forms they replace, on random values of SDXL's
 /// shapes in each dtype, bit for bit: add and add_planes against candle's adds, the two layout
 /// copies against candle's, geglu and group_norm against their one-kernel forms, and layer_norm on
-/// aligned rows against rows that start off the alignment (which take its one-value loads).
+/// aligned rows against rows that start off the alignment (which take its one-value loads), and
+/// upsample2x against candle's nearest upsampling.
 pub fn debug_passes(dev: &candle_core::Device) -> Result<()> {
     fn bits(t: &Tensor) -> Result<Vec<u32>> {
         let f = t.flatten_all()?;
@@ -505,6 +537,8 @@ pub fn debug_passes(dev: &candle_core::Device) -> Result<()> {
                 &tokens_to_planes(&shifted(&t)?, h, w, Some(&x))?,
                 &(&back + &x)?,
             )?;
+            check(&format!("upsample2x {tag}"), &upsample2x(&x)?, &x.upsample_nearest2d(2 * h, 2 * w)?)?;
+            check(&format!("upsample2x, off the alignment {tag}"), &upsample2x(&shifted(&x)?)?, &x.upsample_nearest2d(2 * h, 2 * w)?)?;
             let (ga, be) = (rand(&[c], dt)?, rand(&[c], dt)?);
             for silu in [false, true] {
                 let old = group_norm_one_pass(&x, &ga, &be, 32, 1e-5, silu)?;

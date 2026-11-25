@@ -223,7 +223,7 @@ fn attention_inner(q: &Tensor, k: &Tensor, v: &Tensor, heads: usize, mask: Optio
 pub fn nearest_to(x: &Tensor, oh: usize, ow: usize) -> Result<Tensor> {
     let (_, _, h, w) = x.dims4()?;
     if oh == 2 * h && ow == 2 * w {
-        return x.upsample_nearest2d(oh, ow);
+        return crate::kernels::upsample2x(x);
     }
     let idx = |out: usize, inp: usize| -> Vec<u32> {
         let scale = inp as f32 / out as f32;

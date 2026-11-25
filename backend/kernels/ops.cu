@@ -1744,12 +1744,47 @@ template <typename T> __device__ void tokens_to_planes(const T *t, const T *r, T
     }
 }
 
+// Nearest-neighbour upsampling by two each way, x (planes, H, W) -> y (planes, 2H, 2W): every value
+// to a 2x2 square. A block row per plane; a thread takes four neighbouring values and writes each as
+// two pairs.
+template <typename T> struct alignas(2 * sizeof(T)) Vec2 {
+    T v[2];
+};
+template <typename T> __device__ void upsample2x(const T *x, T *y, int H, int W) {
+    const int p = blockIdx.y, hw = H * W;
+    const T *xp = x + (long)p * hw;
+    T *yp = y + (long)p * 4 * hw;
+    const int i0 = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    if (i0 >= hw) return;
+    int r = i0 / W, c = i0 - r * W;
+    const bool pairs = ((uintptr_t)yp % (2 * sizeof(T))) == 0;
+    for (int i = i0; i < i0 + 4 && i < hw; i++) {
+        const T v = xp[i];
+        T *o = yp + (long)(2 * r) * (2 * W) + 2 * c;
+        if (pairs) {
+            const Vec2<T> two{{v, v}};
+            *reinterpret_cast<Vec2<T> *>(o) = two;
+            *reinterpret_cast<Vec2<T> *>(o + 2 * W) = two;
+        } else {
+            o[0] = v;
+            o[1] = v;
+            o[2 * W] = v;
+            o[2 * W + 1] = v;
+        }
+        if (++c == W) {
+            c = 0;
+            r++;
+        }
+    }
+}
+
 #define INSTANTIATE_PASSES(T, SUFFIX)                                                                              \
     extern "C" __global__ void add_##SUFFIX(const T *a, const T *b, T *y, long n) { add_same<T>(a, b, y, n); }     \
     extern "C" __global__ void add_planes_##SUFFIX(const T *x, const T *e, const T *e2, T *y, int hw, int ec,      \
                                                    int ec2) {                                                      \
         add_planes<T>(x, e, e2, y, hw, ec, ec2);                                                                   \
     }                                                                                                              \
+    extern "C" __global__ void upsample2x_##SUFFIX(const T *x, T *y, int H, int W) { upsample2x<T>(x, y, H, W); }  \
     extern "C" __global__ void planes_to_tokens_##SUFFIX(const T *x, T *y, int B, int C, int HW) {                 \
         planes_to_tokens<T>(x, y, B, C, HW);                                                                       \
     }                                                                                                              \

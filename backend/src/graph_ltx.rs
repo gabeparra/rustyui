@@ -850,30 +850,68 @@ impl Engine {
         let t1 = Instant::now();
         let steps = sigmas.len() - 1;
         let mut last = None;
+        // RUSTYUI_TEST_OOM_STEP=n: step n reports out of memory once, to exercise the recovery below
+        let mut fail_at: Option<usize> = std::env::var("RUSTYUI_TEST_OOM_STEP").ok().and_then(|v| v.parse().ok());
         let each = |i: usize, _: (&Tensor, &Tensor), (dv, da): (&Tensor, &Tensor)| -> Result<()> {
+            if fail_at == Some(i) {
+                fail_at = None;
+                bail!("CUDA_ERROR_OUT_OF_MEMORY (RUSTYUI_TEST_OOM_STEP)");
+            }
             crate::progress::step(i + 1, steps)?;
             last = Some((dv.clone(), da.clone()));
             Ok(())
         };
         let guidance = ltx::Guidance { cond: &context, uncond: negative_context.as_ref(), video_cfg, audio_cfg, dual };
-        let (v, a) = if sampler == "euler" {
-            ltx::sample_euler(&d.dit, &d.st, &mut d.blocks, xv, xa, &sigmas, &guidance, fps, &g.positive.guides, inpaint.as_ref(), each)?
-        } else {
-            ltx::sample_euler_ancestral_rf(
-                &d.dit,
-                &d.st,
-                &mut d.blocks,
-                xv,
-                xa,
-                &sigmas,
-                &guidance,
-                fps,
-                &g.positive.guides,
-                inpaint.as_ref(),
-                seed,
-                self.sms,
-                each,
-            )?
+        let mut each = each;
+        let mut again = 0;
+        let (v, a) = loop {
+            let run = if sampler == "euler" {
+                ltx::sample_euler(
+                    &d.dit,
+                    &d.st,
+                    &mut d.blocks,
+                    xv.clone(),
+                    xa.clone(),
+                    &sigmas,
+                    &guidance,
+                    fps,
+                    &g.positive.guides,
+                    inpaint.as_ref(),
+                    &mut each,
+                )
+            } else {
+                ltx::sample_euler_ancestral_rf(
+                    &d.dit,
+                    &d.st,
+                    &mut d.blocks,
+                    xv.clone(),
+                    xa.clone(),
+                    &sigmas,
+                    &guidance,
+                    fps,
+                    &g.positive.guides,
+                    inpaint.as_ref(),
+                    seed,
+                    self.sms,
+                    &mut each,
+                )
+            };
+            match run {
+                // the card ran out in the middle of the steps: something else took memory after the
+                // blocks were laid out (seen with a 19th block resident and the desktop growing).
+                // Half a gigabyte more is kept free from now on and the sampling starts over; the noise
+                // is the seed's, so the result is the one an undisturbed run gives.
+                Err(e) if is_oom(&e) && again < 3 && d.blocks.resident() > 0 => {
+                    again += 1;
+                    let t = Instant::now();
+                    d.blocks.widen(512 << 20);
+                    d.blocks.fit(tokens, &dev)?;
+                    let left = d.blocks.preload(&d.st, &dev)?;
+                    eprintln!("[ltx] out of memory during the steps: sampling again with {left} blocks resident");
+                    self.timings.push((format!("out of memory during the steps, again with {left} blocks"), t.elapsed().as_secs_f64()));
+                }
+                r => break r?,
+            }
         };
         self.timings.push((format!("{} of the DiT's blocks onto the card ({resident} there)", resident.saturating_sub(before)), load_secs));
         // inverse_noise_scaling: x / (1 - the last sigma), nothing when it is 0

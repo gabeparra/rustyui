@@ -156,6 +156,18 @@ fn ensure_host_blocks(key: &str, st: &MmapedSafetensors, list: &[usize], dev: &D
             });
         }
     });
+    // the file's pages behind these tensors are not read again while the copy lives: told to the
+    // kernel as cold, they are the first it takes back when memory runs short, before the text
+    // encoder's or the resident blocks' (with all of them equally fresh, a new prompt found
+    // Gemma's 9 GB gone and read them from the disk again)
+    let page = 4096usize;
+    for (n, _, _) in &names {
+        let data = st.get(n)?.data();
+        let (from, to) = ((data.as_ptr() as usize).next_multiple_of(page), (data.as_ptr() as usize + data.len()) / page * page);
+        if to > from {
+            unsafe { libc::madvise(from as *mut libc::c_void, to - from, libc::MADV_COLD) };
+        }
+    }
     kernels::mark_pinned(base, base + total);
     HOST_BLOCKS.with(|h| {
         let mut h = h.borrow_mut();
@@ -1235,6 +1247,8 @@ pub fn debug_io(ckpt: &str, reference: &str) -> Result<()> {
 pub struct BlockCache {
     resident: Vec<Option<std::rc::Rc<Block>>>,
     reserve: usize,
+    /// more to keep free than the tokens ask for, after a sampling that ran out of memory
+    margin: usize,
     /// the LoRAs folded into every block this cache loads
     loras: Option<std::rc::Rc<Loras>>,
     /// whether every block's LoRAs are folded and kept (`fold_all`)
@@ -1274,6 +1288,7 @@ impl BlockCache {
         Self {
             resident: vec![],
             reserve,
+            margin: 0,
             loras: None,
             all_folded: false,
             block_bytes: 0,
@@ -1351,13 +1366,13 @@ impl BlockCache {
     /// lets resident blocks go, last first, until that much is free: a bigger graph than the last
     /// one needs more room.
     pub fn fit(&mut self, tokens: usize, dev: &Device) -> Result<()> {
-        self.reserve = Self::for_tokens(tokens).reserve;
+        self.reserve = Self::for_tokens(tokens).reserve + self.margin;
         self.evict_to(self.reserve, dev)
     }
 
     /// The same with `extra` bytes more free for a while (the connectors, loaded beside the blocks)
     pub fn fit_with(&mut self, tokens: usize, extra: usize, dev: &Device) -> Result<()> {
-        self.reserve = Self::for_tokens(tokens).reserve;
+        self.reserve = Self::for_tokens(tokens).reserve + self.margin;
         self.evict_to(self.reserve + extra, dev)
     }
 
@@ -1368,6 +1383,11 @@ impl BlockCache {
         let before = self.resident();
         self.evict_to(bytes, dev)?;
         Ok(before - self.resident())
+    }
+
+    /// Keeps `bytes` more free from the next `fit` on
+    pub fn widen(&mut self, bytes: usize) {
+        self.margin += bytes;
     }
 
     /// Lets the last `n` resident blocks go; returns how many went (0 with none resident)

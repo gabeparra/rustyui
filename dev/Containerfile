@@ -74,12 +74,11 @@ RUN curl -fsSLo /tmp/ippicv.tgz https://raw.githubusercontent.com/opencv/opencv_
  && mkdir -p .local/ippicv-2026.0.0 && tar xzf /tmp/ippicv.tgz -C .local/ippicv-2026.0.0 \
  && rm /tmp/ippicv.tgz
 
-# Node for the editors, pnpm for ui/
+# Node, which runs the editor's tests
 RUN curl -fsSLo /tmp/node.txz https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz \
  && echo "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578  /tmp/node.txz" | sha256sum -c \
  && mkdir -p .local/node && tar xJf /tmp/node.txz -C .local/node --strip-components=1 \
- && rm /tmp/node.txz \
- && PATH=$HOME/.local/node/bin:$PATH npm install -g --prefix $HOME/.local/pnpm11 pnpm@11.13.1
+ && rm /tmp/node.txz
 
 # Rust 1.99.0
 RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init \
@@ -87,7 +86,7 @@ RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.2
  && chmod +x /tmp/rustup-init && /tmp/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain 1.99.0 \
  && rm /tmp/rustup-init
 
-ENV PATH=/home/${DEV_USER}/.local/cuda-12.9/bin:/home/${DEV_USER}/.cargo/bin:/home/${DEV_USER}/.local/node/bin:/home/${DEV_USER}/.local/pnpm11/bin:/usr/local/bin:/usr/bin:/bin
+ENV PATH=/home/${DEV_USER}/.local/cuda-12.9/bin:/home/${DEV_USER}/.cargo/bin:/home/${DEV_USER}/.local/node/bin:/usr/local/bin:/usr/bin:/bin
 # nvcc compiles host code with conda's gcc 14 (the system's is newer than CUDA 12.9 accepts), for
 # candle's and flash-attention's kernels as well as rustyui's own
 ENV CUDA_ROOT=/home/${DEV_USER}/.local/cuda-12.9 \

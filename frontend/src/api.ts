@@ -1,8 +1,8 @@
 // Talking to rustyui-backend. ComfyUI's API is under /api; the editor's own routes (its status
 // and the history of everything the backend has run) are under /rustyui. Both are below where the
-// backend is: the editor is served at <base>/simple/, <base> empty on the backend's own address
-// and the proxy's path when a reverse proxy serves it below one (e.g. /rustyui).
-export const BASE = location.pathname.replace(/\/simple(\/.*)?$/, '')
+// backend is: the editor is served at <base>/, <base> empty on the backend's own address and the
+// proxy's path when a reverse proxy serves it below one (e.g. /rustyui).
+export const BASE = location.pathname.replace(/\/(index\.html)?$/, '')
 
 export interface RequestOptions {
   method?: string

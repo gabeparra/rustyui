@@ -4,7 +4,7 @@
 
 **A ComfyUI-compatible diffusion engine, written in Rust on [candle](https://github.com/huggingface/candle).**
 
-![rustyui with ComfyUI's editor at /, after a render](docs/editor.png)
+![rustyui's node-graph editor after a render, the picture in its queue panel](docs/simple.png)
 
 </div>
 
@@ -17,17 +17,15 @@ the same pixels, bit for bit, on the reference setup described there.
 rustyui is an independent project, not affiliated with or endorsed by Comfy-Org (see
 [Relationship to ComfyUI](#relationship-to-comfyui)).
 
-It is two programs, like ComfyUI:
+The repository holds the engine and a small editor of its own:
 
 - **`rustyui-backend`** (`backend/`) loads the models, runs the graphs, answers the API and serves
-  the editors, all from one binary on `http://127.0.0.1:8190`.
-- **The editors**, compiled into that binary:
-  - `ui/`, at `/`: Comfy-Org's [ComfyUI_frontend](https://github.com/Comfy-Org/ComfyUI_frontend)
-    v1.55.14, vendored essentially unmodified (parts rustyui does not use are removed; see
-    [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). The queue and assets panels, progress on the nodes,
-    cancelling, uploads, the model library, settings and saved workflows work as they do on ComfyUI.
-  - `frontend/`, at `/simple/`: a smaller editor in the layout of Stable Diffusion WebUI Forge
-    (txt2img, img2img, PNG Info), with a node-graph view at `/simple/#graph`.
+  the editor, all from one binary on `http://127.0.0.1:8190`.
+- **The editor** (`frontend/`), compiled into that binary: a form in the layout of Stable Diffusion
+  WebUI Forge (txt2img, img2img, PNG Info) at `/`, and a node-graph view at `/#graph`.
+
+ComfyUI's own editor is not included. Clients written for ComfyUI's API talk to the backend
+directly.
 
 ## Status
 
@@ -35,8 +33,8 @@ rustyui is a work in progress. It is developed and tested on Linux with NVIDIA G
 capability 8.9, mostly an RTX 4090 and an RTX 4070 Ti SUPER); other setups are untested.
 
 - **Works today:** SDXL (text to image, img2img, inpainting, the hires fix, LoRAs, embeddings,
-  ControlNet and the other nodes listed under [Supported nodes](#supported-nodes)), ComfyUI's API
-  and both editors, and the LTX-2.3 workflows described under
+  ControlNet and the other nodes listed under [Supported nodes](#supported-nodes)), ComfyUI's API,
+  the editor, and the LTX-2.3 workflows described under
   [How it matches ComfyUI](#how-it-matches-comfyui), checked against ComfyUI as described there.
 - **Partial:** LTX-2.3 (CFG above 1 does not run with guides yet; `t2v` from the command line is
   silent; the published fp8 DiT runs but does not match ComfyUI, the bf16 one does) and Anima (implemented, not yet checked against ComfyUI).
@@ -50,12 +48,11 @@ The short version; [Installing](#installing) has the details and the build varia
 
 1. **Requirements.** Linux x86-64, an NVIDIA GPU of compute capability 8.9, the CUDA 12.9 toolkit,
    cuDNN 9.19, Intel MKL and IPP ICV (downloaded by you), Rust 1.99.0 (pinned by
-   `rust-toolchain.toml`), cmake, Node.js 20 or newer, pnpm 11 and bun. The pinned container in
-   [`dev/`](dev/README.md) provides all of them.
+   `rust-toolchain.toml`) and cmake, plus bun and Node.js 22 or newer for the editor. The pinned
+   container in [`dev/`](dev/README.md) provides all of them except bun.
 2. **Build.**
    ```bash
    git clone https://github.com/gabeparra/rustyui.git && cd rustyui
-   (cd ui && pnpm install --frozen-lockfile && pnpm exec vite build --config vite.config.mts)
    (cd frontend && bun install --frozen-lockfile && bun run build)
    cargo build --release
    ```
@@ -66,8 +63,8 @@ The short version; [Installing](#installing) has the details and the build varia
    ```bash
    ./target/release/rustyui-backend serve --models /path/to/ComfyUI/models --out /path/to/output
    ```
-5. **Open** http://127.0.0.1:8190 for ComfyUI's editor, or http://127.0.0.1:8190/simple/ for the
-   simple one.
+5. **Open** http://127.0.0.1:8190 for the form, or http://127.0.0.1:8190/#graph for the node
+   graph.
 
 On a card with less memory, `--no-video` leaves the video nodes out; the image models stay in VRAM
 only while there is room for what runs next.
@@ -76,7 +73,7 @@ only while there is room for what runs next.
 
 - **ComfyUI's formats.** Opens and saves ComfyUI workflows and API graphs. Every PNG carries
   ComfyUI's `prompt` text chunk, and `workflow` when the editor sends one, so a picture dropped on
-  either editor, or on ComfyUI, reopens its graph.
+  the node graph, or on ComfyUI, reopens its graph.
 - **ComfyUI's API.** `/prompt`, `/queue`, `/history`, `/jobs`, `/object_info`, `/view`,
   `/upload/image`, `/interrupt`, `/free` and the rest, also under `/api/`, plus the websocket
   `/ws` with ComfyUI's events. Existing clients and scripts work unchanged.
@@ -108,7 +105,7 @@ only while there is room for what runs next.
 <tr>
 <td><a href="docs/examples/lighthouse.png"><code>lighthouse.png</code></a>: an SDXL checkpoint
 (Juggernaut XL v9), 1216x832, dpmpp_2m karras, 30 steps. The PNG holds its graph: drop it on
-either editor, or on ComfyUI. It is rustyui's render on an RTX 4090; ComfyUI 0.39.0 (default
+the node graph, or on ComfyUI. It is rustyui's render on an RTX 4090; ComfyUI 0.39.0 (default
 flags) rendered the same graph with the same checkpoint file to identical pixels, all 1,011,712
 of them.</td>
 <td><a href="docs/examples/lighthouse-hires.json"><code>lighthouse-hires.json</code></a>: the same
@@ -194,7 +191,7 @@ matched.
 ## Supported nodes
 
 Each node is ComfyUI's, with the same class name, inputs, widget order, defaults and outputs. The
-definitions the editors show come from ComfyUI's own `/object_info`
+definitions the editor shows come from ComfyUI's own `/object_info`
 ([`backend/assets/comfy_object_info.json`](backend/assets/comfy_object_info.json)), with the
 choices cut to what rustyui runs. A graph with any other node is refused before it starts, with the
 node's name. Widget inputs take links from INT, FLOAT, STRING and BOOLEAN outputs, as in ComfyUI.
@@ -292,30 +289,29 @@ rustyui is built from source.
   when either is not found.
 - Rust 1.99.0, which [`rust-toolchain.toml`](rust-toolchain.toml) pins, and `cmake` (the
   sentencepiece crate builds with it).
-- Node.js 20 or newer for the editors, and pnpm 11 for `ui/`.
+- For the editor, [bun](https://bun.sh) (CI uses 1.4.2) and Node.js 22 or newer.
 - For video, the `ffmpeg` program. ComfyUI encodes through PyAV's own FFmpeg 8.1.2 libraries; with
   PyAV's build of those libraries (rustyui now fetches 8.1.3-1, since 8.1.2-1 was withdrawn; see [`third_party/ffmpeg-pyav/README.md`](third_party/ffmpeg-pyav/README.md),
   located by `RUSTYUI_FFMPEG_LIB`) rustyui writes the same packets. Without them it uses the
   system's FFmpeg, whose AAC encoder can differ, and says so once.
 
 Every tool above is pinned by version and checksum in a container, [`dev/`](dev/README.md), which
-is the simplest way to get a working build.
+is the simplest way to get a working build of the backend (bun is not in it).
 
 ### Building
 
 ```bash
 git clone https://github.com/gabeparra/rustyui.git && cd rustyui
-(cd ui && pnpm install --frozen-lockfile && pnpm exec vite build --config vite.config.mts)
 (cd frontend && bun install --frozen-lockfile && bun run build)
 cargo build --release
 cargo test --release -p rustyui-backend
 ```
 
-The editors are built first, because the backend compiles in whatever `ui/dist` and
-`frontend/dist` hold. Without them the backend still builds, and each editor's page says how to
-build it. The first build compiles the FlashAttention kernels, about 15 minutes; after that a
-change rebuilds in seconds. Run the tests with `-p rustyui-backend`: a plain `cargo test` also
-builds candle-flash-attn's own tests, which fail.
+The editor is built first, because the backend compiles in whatever `frontend/dist` holds. Without
+it the backend still builds, and the editor's page says how to build it. The first build compiles
+the FlashAttention kernels, about 15 minutes; after that a change rebuilds in seconds. Run the tests
+with `-p rustyui-backend`: a plain `cargo test` also builds candle-flash-attn's own tests, which
+fail.
 
 Build variables:
 
@@ -337,8 +333,8 @@ The `~/.local` defaults are the layout the [`dev/`](dev/README.md) container ins
 ./target/release/rustyui-backend serve --models /path/to/ComfyUI/models --out /path/to/output
 ```
 
-Open **http://127.0.0.1:8190** for ComfyUI's editor, or **http://127.0.0.1:8190/simple/** for the
-simple one. Pick a checkpoint and queue.
+Open **http://127.0.0.1:8190** for the form, or **http://127.0.0.1:8190/#graph** for the node
+graph. Pick a checkpoint and generate.
 
 From a script, send what you would send ComfyUI:
 
@@ -371,7 +367,7 @@ it to unload before each job, so the two never hold the GPU at the same time.
 ## Command line
 
 ```bash
-rustyui-backend serve [options]                 # the API and the editors on 127.0.0.1:8190
+rustyui-backend serve [options]                 # the API and the editor on 127.0.0.1:8190
 rustyui-backend run graph.json --out DIR        # render a ComfyUI API graph once
 rustyui-backend from-png picture.png --out DIR  # render the graph inside a ComfyUI or rustyui PNG
 rustyui-backend compare a.png b.png             # mean and largest pixel difference, PSNR
@@ -393,10 +389,10 @@ rustyui's tensors with captures from ComfyUI; see [`backend/refs/`](backend/refs
 | `--listen ADDR` | `127.0.0.1:8190` | loopback addresses only; anything else is refused |
 | `--models DIR` | `./models` | a folder laid out like ComfyUI's `models/`; also `RUSTYUI_MODELS` |
 | `--out DIR` | `./output` | where renders go; also `RUSTYUI_OUTPUT` |
-| `--prefix NAME` | `rustyui` | the `SaveImage` prefix the editors start from |
+| `--prefix NAME` | `rustyui` | the `SaveImage` prefix the editor starts from |
 | `--idle S` | `90` | unload the models after this long without work |
 | `--exit-idle S` | `120` under socket activation, else never | exit after this long with no request |
-| `--frontend DIR` | built in | serve the editor at `/` from a folder (`ui/dist`), for editor development |
+| `--frontend DIR` | built in | serve the files in `DIR` at `/` instead of the built-in editor: a fresh `frontend/dist`, or another editor's build |
 | `--mirror HOST:DIR` | | copy every render to the same place under `DIR` on `HOST` (rsync over ssh, never overwriting a name already there) |
 | `--writer FILE.gguf` | | enable the prompt writer with this Gemma 3 instruct model |
 | `--writer-tokenizer FILE` | `text_encoders/gemma_3_12B_it_fp4_mixed.safetensors` | a safetensors file carrying Gemma 3's SentencePiece model |
@@ -432,10 +428,10 @@ ComfyUI's routes, each also under `/api/`:
 | `GET /embeddings`, `/models[/<folder>]`, `/view_metadata/<folder>`, `/system_stats` | as ComfyUI |
 | `GET /ws` | the websocket: `status`, `executing`, `progress`, `progress_state`, `executed`, `execution_*` |
 
-ComfyUI's editor also uses `/users`, `/settings`, `/userdata`, `/v2/userdata`,
-`/experiment/models`, `/extensions`, `/features` and `/internal/*`. Settings, saved workflows and
-user files live in `user/default/` beside the models folder, which is ComfyUI's own layout, so both
-programs open them.
+The routes ComfyUI's own editor uses are answered too: `/users`, `/settings`, `/userdata`,
+`/v2/userdata`, `/experiment/models`, `/extensions`, `/features` and `/internal/*`. Settings, saved
+workflows and user files live in `user/default/` beside the models folder, which is ComfyUI's own
+layout, so both programs open them.
 
 rustyui's additions:
 
@@ -452,25 +448,22 @@ Each entry of `extra_data.extra_pnginfo` is written as a PNG text chunk, as Comf
 ASCII-escaped, since PNG text is Latin-1). Model names, `filename_prefix` and `/view` paths are kept
 inside their folders, symlinks followed.
 
-## The editors
+## The editor
 
-**`/`: ComfyUI's editor.** Comfy-Org's ComfyUI_frontend v1.55.14, vendored in `ui/` and served as
-it is. [`ui/UPSTREAM.md`](ui/UPSTREAM.md) records the upstream commit and how to move to a later
-version. It reads the backend's nodes from `/object_info`, so it offers only what rustyui runs, with
-the installed models in each combo. Its keyboard shortcuts are ComfyUI's (Settings → Keybinding).
+It is served at `/`, and its old address `/simple/` redirects there. See
+[`frontend/README.md`](frontend/README.md).
 
-**`/simple/`: the simple editor.** A form in Stable Diffusion WebUI Forge's layout, for SDXL: the
-checkpoint on top, txt2img, img2img and PNG Info tabs, the hires fix, an upscale after the last
-decode, a LoRA list that inserts `<lora:name:weight>` tags, and the prompt writer when one is
-loaded. Each run is a ComfyUI API graph built from the nodes above, so every picture it makes
-reopens in ComfyUI. PNG Info reads both ComfyUI graphs and A1111/Forge `parameters` text.
-`/simple/#graph` is a LiteGraph node editor with a queue, a history with thumbnails, and a picture
-viewer. See [`frontend/README.md`](frontend/README.md).
+**`/`: the form.** Stable Diffusion WebUI Forge's layout, for SDXL: the checkpoint on top, txt2img,
+img2img and PNG Info tabs, the hires fix, an upscale after the last decode, a LoRA list that inserts
+`<lora:name:weight>` tags, and the prompt writer when one is loaded. Each run is a ComfyUI API graph
+built from the nodes above, so every picture it makes reopens in ComfyUI. PNG Info reads both
+ComfyUI graphs and A1111/Forge `parameters` text.
 
-<img src="docs/simple.png" alt="the simple editor's node-graph view after a render, the picture in its queue panel" />
+**`/#graph`: the node graph.** A LiteGraph node editor with a queue, a history with thumbnails, and
+a picture viewer. It reads the backend's nodes from `/object_info`, so it offers only what rustyui
+runs, with the installed models in each combo.
 
-In both editors only what an output node needs is run, in ComfyUI's order, after the graph is
-checked.
+In both views only what an output node needs is run, in ComfyUI's order, after the graph is checked.
 
 ## How it matches ComfyUI
 
@@ -626,10 +619,10 @@ weights through page-locked memory.
 The backend answers its own machine only. It refuses to listen anywhere but loopback (a socket
 passed by systemd included), and refuses a request whose `Host` is not a loopback name (DNS
 rebinding), whose `Origin` is not the editor's own (another local port included), or that the
-browser marks as cross-site (`Sec-Fetch-Site`). Opening an editor from a link, a top-level
-navigation to `/` or `/simple/`, is the one cross-site request let through. Scripts and `curl`
-send none of these headers and work as they do with ComfyUI. From another machine, use an ssh
-tunnel.
+browser marks as cross-site (`Sec-Fetch-Site`). Opening the editor from a link, a top-level
+navigation to `/` (or its old address `/simple/`), is the one cross-site request let through.
+Scripts and `curl` send none of these headers and work as they do with ComfyUI. From another
+machine, use an ssh tunnel.
 
 ## Architecture
 
@@ -654,8 +647,7 @@ rustyui/
 │   │                        mem_eff.cu (torch's memory-efficient attention), ck.cu (comfy_kitchen)
 │   ├── assets/              ComfyUI's node definitions, tokenizer data
 │   └── refs/                capture scripts that record ComfyUI's tensors to check against
-├── ui/                      ComfyUI_frontend v1.55.14, served at /
-├── frontend/                the simple editor, served at /simple/
+├── frontend/                the editor, served at /
 ├── third_party/             patched candle crates and vendored native dependencies
 ├── deploy/                  systemd user socket and service
 ├── dev/                     the pinned build container
@@ -680,8 +672,8 @@ download instructions for Intel MKL, Intel IPP ICV and PyAV's FFmpeg.
   `attention_mask` or IC-LoRA parameters; `t2v` from the command line is silent.
 - Exactness is checked against one reference setup (above). On other GPUs, CPUs or library
   versions the numbers can differ, as ComfyUI's own would.
-- The simple editor's graph view has no undo, and ComfyUI subgraphs open there as red nodes. Use
-  the editor at `/` for those.
+- The node graph has no undo or interrupt button, and ComfyUI subgraphs open there as red nodes.
+  The form has an interrupt button; a graph with subgraphs needs ComfyUI's editor.
 
 Next:
 
@@ -703,7 +695,7 @@ compared with.
 A new node keeps ComfyUI's class name, inputs, widget order, defaults and outputs, takes its
 definition from ComfyUI's `/object_info` (`backend/refs/object_info_ref.py`), and comes with a check
 against a capture from ComfyUI, as the scripts in [`backend/refs/`](backend/refs/README.md) do.
-Run `cargo test --release -p rustyui-backend` and the simple editor's tests
+Run `cargo test --release -p rustyui-backend` and the editor's tests
 (`cd frontend && node --experimental-strip-types --test tests/forge.test.ts`) before sending a change.
 
 ## Models
@@ -716,16 +708,16 @@ models (SDXL base, Juggernaut XL v9, Remacri) only as examples.
 ## Relationship to ComfyUI
 
 rustyui is an independent project. It is not affiliated with or endorsed by Comfy-Org or the
-ComfyUI project. It implements ComfyUI's HTTP API and file formats for compatibility, ports parts of
-ComfyUI's behaviour (credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), and vendors
-Comfy-Org's ComfyUI_frontend under the GPL-3.0 in `ui/`.
+ComfyUI project. It implements ComfyUI's HTTP API and file formats for compatibility and ports
+parts of ComfyUI's code to Rust (credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). It
+does not include ComfyUI's editor.
 
 ## License
 
 rustyui is licensed under the [GNU General Public License v3.0](LICENSE), the license of ComfyUI,
-from which several parts are ported, and of ComfyUI_frontend, which `ui/` vendors. The vendored code
-in `third_party/` and `backend/kernels/ck.cu` keeps its own licence (Apache-2.0, MIT or
-BSD-3-Clause); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+from which several parts are ported. The vendored code in `third_party/` and `backend/kernels/ck.cu`
+keeps its own licence (Apache-2.0, MIT or BSD-3-Clause); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Intel MKL and Intel IPP ICV are under Intel's own licences. They are not part of this repository:
 you download them yourself, and the build links them statically. A binary built with them carries

@@ -13,7 +13,7 @@ are all welcome.
   good-sized pull request.
 - A graph that renders differently from ComfyUI is the most useful bug report there is (label
   `exactness`). Attach the graph and both outputs.
-- Without an NVIDIA card you can still work on the two editors, the HTTP API, the documentation and
+- Without an NVIDIA card you can still work on the editor, the HTTP API, the documentation and
   everything the unit tests cover; CI builds the backend and runs those tests for you.
 - Questions and ideas go to [Discussions](https://github.com/gabeparra/rustyui/discussions).
 
@@ -30,7 +30,6 @@ See the README for requirements. The pinned container in `dev/` (see `dev/README
 simplest way to get every native dependency at the right version. Then:
 
 ```bash
-(cd ui && pnpm install --frozen-lockfile && pnpm exec vite build --config vite.config.mts)
 (cd frontend && bun install --frozen-lockfile && bun run build)
 cargo build --release
 cargo test --release -p rustyui-backend
@@ -40,7 +39,7 @@ For editor work, run the backend and the Vite dev server side by side:
 
 ```bash
 ./target/release/rustyui-backend serve --models /path/to/models
-(cd frontend && bun run dev)     # the simple editor with hot reload; API calls go on to :8190
+(cd frontend && bun run dev)     # the editor with hot reload; API calls go on to :8190
 ```
 
 ## Checks
@@ -53,9 +52,6 @@ cargo clippy --release -p rustyui-backend --no-deps -- -D warnings
 cargo test --release -p rustyui-backend
 (cd frontend && bun run typecheck && bun run build && node --experimental-strip-types --test tests/forge.test.ts)
 ```
-
-`ui/` is upstream ComfyUI_frontend; changes there should be kept small and listed in
-`ui/UPSTREAM.md`, so a later upstream version can be taken without losing them.
 
 ## Pull requests
 

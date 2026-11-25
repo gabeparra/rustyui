@@ -1,7 +1,7 @@
 // Compile rustyui's CUDA and C++ kernels, link the native libraries whose arithmetic ComfyUI's
 // results depend on (cuDNN, Intel MKL's VML, Intel IPP ICV), let the binary find a CUDA toolkit
-// and cuDNN outside the system library path without LD_LIBRARY_PATH, and compile the editors
-// into the binary: ComfyUI's, forked (../ui/dist), and the simple editor (../frontend/dist).
+// and cuDNN outside the system library path without LD_LIBRARY_PATH, and compile the editor
+// (../frontend/dist) into the binary.
 //
 // Where things are looked for (each can be set in the environment):
 //   CUDA_ROOT        the CUDA 12.9 toolkit: else CUDA_PATH, the nvcc on PATH, ~/.local/cuda-12.9
@@ -224,14 +224,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=pthread");
     println!("cargo:rustc-link-lib=dylib=m");
     println!("cargo:rustc-link-lib=dylib=dl");
-    embed(
-        &out,
-        "editor.rs",
-        "../ui/dist",
-        "EDITOR",
-        "cd ui && pnpm install --frozen-lockfile && pnpm exec vite build --config vite.config.mts (ui/UPSTREAM.md)",
-    );
-    embed(&out, "simple.rs", "../frontend/dist", "SIMPLE", "cd frontend && bun install --frozen-lockfile && bun run build");
+    embed(&out, "editor.rs", "../frontend/dist", "EDITOR", "cd frontend && bun install --frozen-lockfile && bun run build");
 }
 
 /// `$OUT_DIR/<file>`: every file of `dir` as (path, bytes) in a static named `name`, the
@@ -245,7 +238,7 @@ fn embed(out: &str, file: &str, dir: &str, name: &str, how: &str) {
     files.retain(|(rel, _)| !rel.ends_with(".map"));
     files.sort();
     if !files.iter().any(|(rel, _)| rel == "index.html") {
-        println!("cargo:warning={dir} has no index.html, so this backend lacks that editor: {how}, then build again");
+        println!("cargo:warning={dir} has no index.html, so this backend lacks the editor: {how}, then build again");
     }
     let mut src = format!("/// {dir}, by path\npub static {name}: &[(&str, &[u8])] = &[\n");
     for (rel, abs) in &files {

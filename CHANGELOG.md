@@ -6,8 +6,16 @@ All notable changes to rustyui are listed here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- The copy of ComfyUI's editor (ComfyUI_frontend v1.55.14, `ui/`). The repository no longer
+  includes it, and building no longer needs pnpm.
+
 ### Changed
 
+- rustyui's own editor is served at `/` (the node graph at `/#graph`); `/simple/` redirects there.
+  `--frontend DIR` serves a folder at `/` as before, so point it at `frontend/dist` rather than
+  `ui/dist`.
 - SDXL is faster with the same output: on an RTX 4090 a warm run takes 87 to 92 percent of ComfyUI's
   time and the sampling steps 93 percent (they took 106 percent before), from faster adds, norms,
   GEGLU and layout copies, no zero-filling of buffers that are overwritten, and the prompt projected

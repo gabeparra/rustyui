@@ -17,15 +17,20 @@ the same pixels, bit for bit, on the reference setup described there.
 rustyui is an independent project, not affiliated with or endorsed by Comfy-Org (see
 [Relationship to ComfyUI](#relationship-to-comfyui)).
 
-The repository holds the engine and a small editor of its own:
+## Ways to use it
 
-- **`rustyui-backend`** (`backend/`) loads the models, runs the graphs, answers the API and serves
-  the editor, all from one binary on `http://127.0.0.1:8190`.
-- **The editor** (`frontend/`), compiled into that binary: a form in the layout of Stable Diffusion
-  WebUI Forge (txt2img, img2img, PNG Info) at `/`, and a node-graph view at `/#graph`.
+The engine is **`rustyui-backend`** (`backend/`): one binary that loads the models, runs ComfyUI
+API graphs and answers ComfyUI's HTTP API on `http://127.0.0.1:8190`. You build it once (see
+[Quick start](#quick-start)), then drive it whichever way suits you:
 
-ComfyUI's own editor is not included. Clients written for ComfyUI's API talk to the backend
-directly.
+| | What you get | Add to the engine |
+|---|---|---|
+| **Inside ComfyUI** | Keep ComfyUI, its editor and your workflows. One node, **Run on rustyui**, sends the workflow to the engine and shows the result in ComfyUI | the node pack in [`comfyui-rustyui/`](comfyui-rustyui/README.md): [Inside ComfyUI](#inside-comfyui) |
+| **ComfyUI's editor, no ComfyUI** | ComfyUI's official editor served by the engine, without installing ComfyUI | one pip package: [ComfyUI's editor without ComfyUI](#comfyuis-editor-without-comfyui) |
+| **rustyui's own editor** | A Forge-style form at `/` and a node graph at `/#graph` (`frontend/`), built into the binary | nothing: [The editor](#the-editor) |
+| **Scripts and API clients** | Anything that speaks ComfyUI's API: `curl`, Python scripts, other front ends | nothing: [API](#api) |
+
+The repository holds no copy of ComfyUI or of its editor.
 
 ## Status
 
@@ -64,7 +69,8 @@ The short version; [Installing](#installing) has the details and the build varia
    ./target/release/rustyui-backend serve --models /path/to/ComfyUI/models --out /path/to/output
    ```
 5. **Open** http://127.0.0.1:8190 for the form, or http://127.0.0.1:8190/#graph for the node
-   graph.
+   graph. To render from ComfyUI instead, add the node pack:
+   [Inside ComfyUI](#inside-comfyui).
 
 On a card with less memory, `--no-video` leaves the video nodes out; the image models stay in VRAM
 only while there is room for what runs next.
@@ -361,6 +367,43 @@ systemctl --user daemon-reload && systemctl --user enable --now rustyui-backend.
 
 After installing a new build, `systemctl --user stop rustyui-backend`: the next request starts it.
 
+### Inside ComfyUI
+
+The node pack in [`comfyui-rustyui/`](comfyui-rustyui/README.md) adds one node to ComfyUI, **Run
+on rustyui**. Put it in any workflow and queue as usual: ComfyUI sends the workflow to the engine,
+unloads its own models while the engine renders, and shows the pictures or video on that node and
+in its queue. Switch the node off to render in ComfyUI again. It needs nothing beyond ComfyUI and
+Python's standard library.
+
+```bash
+ln -s ~/rustyui/comfyui-rustyui /path/to/ComfyUI/custom_nodes/comfyui-rustyui   # then restart ComfyUI
+rustyui-backend serve --models /path/to/ComfyUI/models --out /path/to/ComfyUI/output
+```
+
+With the engine writing into ComfyUI's output folder, both programs keep their results in one
+place. The whole workflow runs in the engine, so every node in it has to be one rustyui runs
+([Supported nodes](#supported-nodes)); a workflow with another node is refused, naming it. See the
+node pack's [README](comfyui-rustyui/README.md) for the details.
+
+### ComfyUI's editor without ComfyUI
+
+ComfyUI's editor is published on PyPI as `comfyui-frontend-package`, the build ComfyUI itself
+serves. `--frontend` serves it in place of rustyui's own editor; the engine answers the routes it
+uses (settings, saved workflows, the queue and assets panels, the model library). Version 1.55.14
+is the one checked with rustyui.
+
+```bash
+python3 -m venv ~/.local/share/rustyui/comfy-editor
+~/.local/share/rustyui/comfy-editor/bin/pip install comfyui-frontend-package==1.55.14
+EDITOR_DIR=$(~/.local/share/rustyui/comfy-editor/bin/python -c \
+  'import comfyui_frontend_package as p, os; print(os.path.join(os.path.dirname(p.__file__), "static"))')
+rustyui-backend serve --models /path/to/ComfyUI/models --out /path/to/output --frontend "$EDITOR_DIR"
+```
+
+A ComfyUI install already has the package in its Python environment; point `--frontend` at that
+copy's `static` folder instead. Settings and saved workflows live in `user/default/` beside the
+models folder, ComfyUI's own layout, so ComfyUI and the engine share them.
+
 If a ComfyUI server is running on `127.0.0.1:8188`, rustyui waits for its queue to empty and asks
 it to unload before each job, so the two never hold the GPU at the same time.
 
@@ -392,7 +435,7 @@ rustyui's tensors with captures from ComfyUI; see [`backend/refs/`](backend/refs
 | `--prefix NAME` | `rustyui` | the `SaveImage` prefix the editor starts from |
 | `--idle S` | `90` | unload the models after this long without work |
 | `--exit-idle S` | `120` under socket activation, else never | exit after this long with no request |
-| `--frontend DIR` | built in | serve the files in `DIR` at `/` instead of the built-in editor: a fresh `frontend/dist`, or another editor's build |
+| `--frontend DIR` | built in | serve the files in `DIR` at `/` instead of the built-in editor: a fresh `frontend/dist`, or [ComfyUI's editor](#comfyuis-editor-without-comfyui) |
 | `--mirror HOST:DIR` | | copy every render to the same place under `DIR` on `HOST` (rsync over ssh, never overwriting a name already there) |
 | `--writer FILE.gguf` | | enable the prompt writer with this Gemma 3 instruct model |
 | `--writer-tokenizer FILE` | `text_encoders/gemma_3_12B_it_fp4_mixed.safetensors` | a safetensors file carrying Gemma 3's SentencePiece model |
@@ -647,7 +690,8 @@ rustyui/
 │   │                        mem_eff.cu (torch's memory-efficient attention), ck.cu (comfy_kitchen)
 │   ├── assets/              ComfyUI's node definitions, tokenizer data
 │   └── refs/                capture scripts that record ComfyUI's tensors to check against
-├── frontend/                the editor, served at /
+├── frontend/                rustyui's editor, served at /
+├── comfyui-rustyui/         the ComfyUI node pack ("Run on rustyui")
 ├── third_party/             patched candle crates and vendored native dependencies
 ├── deploy/                  systemd user socket and service
 ├── dev/                     the pinned build container
@@ -673,7 +717,8 @@ download instructions for Intel MKL, Intel IPP ICV and PyAV's FFmpeg.
 - Exactness is checked against one reference setup (above). On other GPUs, CPUs or library
   versions the numbers can differ, as ComfyUI's own would.
 - The node graph has no undo or interrupt button, and ComfyUI subgraphs open there as red nodes.
-  The form has an interrupt button; a graph with subgraphs needs ComfyUI's editor.
+  The form has an interrupt button; a graph with subgraphs needs ComfyUI's editor, through
+  [the node pack](#inside-comfyui) or [on its own](#comfyuis-editor-without-comfyui).
 
 Next:
 
@@ -695,8 +740,9 @@ compared with.
 A new node keeps ComfyUI's class name, inputs, widget order, defaults and outputs, takes its
 definition from ComfyUI's `/object_info` (`backend/refs/object_info_ref.py`), and comes with a check
 against a capture from ComfyUI, as the scripts in [`backend/refs/`](backend/refs/README.md) do.
-Run `cargo test --release -p rustyui-backend` and the editor's tests
-(`cd frontend && node --experimental-strip-types --test tests/forge.test.ts`) before sending a change.
+Run `cargo test --release -p rustyui-backend`, the editor's tests
+(`cd frontend && node --experimental-strip-types --test tests/forge.test.ts`) and the node pack's
+(`python3 -m unittest discover -s comfyui-rustyui/tests`) before sending a change.
 
 ## Models
 
@@ -710,7 +756,8 @@ models (SDXL base, Juggernaut XL v9, Remacri) only as examples.
 rustyui is an independent project. It is not affiliated with or endorsed by Comfy-Org or the
 ComfyUI project. It implements ComfyUI's HTTP API and file formats for compatibility and ports
 parts of ComfyUI's code to Rust (credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). It
-does not include ComfyUI's editor.
+includes no copy of ComfyUI or of its editor: the node pack runs inside your own ComfyUI, and
+ComfyUI's editor comes from Comfy-Org's own package.
 
 ## License
 

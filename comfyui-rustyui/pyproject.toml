@@ -1,0 +1,12 @@
+[project]
+name = "comfyui-rustyui"
+version = "0.1.0"
+description = "Run a ComfyUI workflow on rustyui-backend, a ComfyUI-compatible engine in Rust: add one node and queue."
+license = { text = "GPL-3.0-only" }
+requires-python = ">=3.10"
+# standard library only; ComfyUI provides the rest
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/gabeparra/rustyui"
+

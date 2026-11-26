@@ -98,6 +98,13 @@ impl Job {
     fn client(&self) -> Option<&str> {
         self.extra_data["client_id"].as_str().filter(|c| !c.is_empty())
     }
+
+    /// Sent by the ComfyUI node pack from inside a running ComfyUI job (`extra_data.rustyui_from_comfyui`):
+    /// ComfyUI's queue stays busy until this prompt is done, so waiting for it would wait for itself.
+    /// The node unloads ComfyUI's models before it sends the prompt.
+    fn sent_by_comfyui(&self) -> bool {
+        truthy(&self.extra_data["rustyui_from_comfyui"])
+    }
 }
 
 /// A number as Python's json writes it: a whole one stays an int
@@ -343,7 +350,9 @@ fn run_jobs(srv: &Arc<Server>) -> (String, Instant) {
                 s = srv.cv.wait_timeout(s, Duration::from_secs(1)).unwrap().0;
             }
         };
-        comfy_yield();
+        if !matches!(&next, Next::Render(j) if j.sent_by_comfyui()) {
+            comfy_yield();
+        }
         let job = match next {
             Next::Write(w) => {
                 let answer = (|| {
@@ -1838,6 +1847,15 @@ mod tests {
         // asked for more than it has: the file as it is
         assert_eq!(thumbnail(&file, 512).unwrap().1, fs::read(&file).unwrap());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prompts_from_inside_comfyui_skip_the_wait() {
+        let job = |extra: Value| Job { id: "x".into(), number: 0.0, graph: json!({}), extra: vec![], extra_data: extra, outputs: vec![] };
+        assert!(job(json!({"rustyui_from_comfyui": true})).sent_by_comfyui());
+        for extra in [json!({}), json!({"rustyui_from_comfyui": false}), json!({"client_id": "abc"})] {
+            assert!(!job(extra.clone()).sent_by_comfyui(), "{extra}");
+        }
     }
 
     #[test]

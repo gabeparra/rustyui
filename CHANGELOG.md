@@ -6,6 +6,18 @@ All notable changes to rustyui are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `comfyui-rustyui/`, a ComfyUI node pack: a **Run on rustyui** node sends the workflow to
+  rustyui-backend and shows the result in ComfyUI.
+- The README's install paths, including ComfyUI's official editor (`comfyui-frontend-package`)
+  served by the backend with `--frontend`.
+
+### Fixed
+
+- A prompt sent from inside a running ComfyUI no longer waits for ComfyUI's queue to empty, which
+  holds that very prompt.
+
 ### Removed
 
 - The copy of ComfyUI's editor (ComfyUI_frontend v1.55.14, `ui/`). The repository no longer

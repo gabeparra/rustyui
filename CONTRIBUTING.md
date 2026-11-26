@@ -51,6 +51,7 @@ cargo fmt -p rustyui-backend --check
 cargo clippy --release -p rustyui-backend --no-deps -- -D warnings
 cargo test --release -p rustyui-backend
 (cd frontend && bun run typecheck && bun run build && node --experimental-strip-types --test tests/forge.test.ts)
+python3 -m unittest discover -s comfyui-rustyui/tests
 ```
 
 ## Pull requests
@@ -90,9 +91,10 @@ discussions alike.
 - Rust: `rustfmt` with the repository's settings, no new clippy warnings, `anyhow` errors with
   context a user can act on.
 - TypeScript and Vue: strict types, no new dependencies without a reason in the pull request.
-- No Python in the program itself. Python belongs only in `backend/refs/`, the scripts that capture
-  ComfyUI's tensors to check rustyui against. When ComfyUI's numbers come from a native library,
-  link or port that library.
+- No Python in the engine. Python belongs only in `backend/refs/`, the scripts that capture
+  ComfyUI's tensors to check rustyui against, and in `comfyui-rustyui/`, the node pack that runs
+  inside ComfyUI (standard library only; it talks to the engine over HTTP and never renders). When
+  ComfyUI's numbers come from a native library, link or port that library.
 - Comments explain why, not what. Keep them short.
 - Commit messages: a specific subject line, then a short paragraph on the reason for the change.
 

@@ -65,7 +65,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: docker/setup-buildx-action@v3
       - name: Dev container
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: dev
           file: dev/Containerfile

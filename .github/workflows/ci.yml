@@ -74,7 +74,7 @@ jobs:
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             .ci-cargo/registry

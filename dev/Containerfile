@@ -12,8 +12,12 @@ FROM docker.io/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23da
 ARG DEV_USER=dev
 
 ARG SNAPSHOT=20261015T120000Z
-# the snapshot is served over HTTPS, which the bare image cannot check until it has CA certificates
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# the snapshot is served over HTTPS, which the bare image cannot check until it has CA certificates.
+# snapshot.ubuntu.com answers 503 now and then (CI run 45590205265 lost 37 minutes to two), so apt
+# retries each file instead of giving up on the first refusal
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "60"; Acquire::https::Timeout "60";' \
+      > /etc/apt/apt.conf.d/80-rustyui-retries \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates \
  && apt-get update --snapshot "$SNAPSHOT" \
  && apt-get install --snapshot "$SNAPSHOT" -y --no-install-recommends \
       build-essential cmake pkg-config git curl ca-certificates ffmpeg unzip xz-utils zstd bzip2 \
